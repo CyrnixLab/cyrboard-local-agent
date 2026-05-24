@@ -24,9 +24,9 @@
     "claude"
   ],
   "bin": {
-    "cyrboard-local-agent": "./bin/cyrboard-local-agent.js",
-    "cyrnixlab-local-agent": "./bin/cyrboard-local-agent.js",
-    "cyrnix-local-agent": "./bin/cyrboard-local-agent.js"
+    "cyrboard-local-agent": "bin/cyrboard-local-agent.js",
+    "cyrnixlab-local-agent": "bin/cyrboard-local-agent.js",
+    "cyrnix-local-agent": "bin/cyrboard-local-agent.js"
   },
   "engines": {
     "node": ">=20.0.0"
