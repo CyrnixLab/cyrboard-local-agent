@@ -1,0 +1,52 @@
+{
+  "name": "@cyrnixlab/cyrboard-local-agent",
+  "version": "0.1.0",
+  "description": "Local runner connector for Cyrnix/Cyrboard Tracker Local Agent / MCP jobs.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Cyrnix Lab <cyrboard@cyrnix.dev>",
+  "homepage": "https://github.com/CyrnixLab/cyrboard-local-agent#readme",
+  "bugs": {
+    "url": "https://github.com/CyrnixLab/cyrboard-local-agent/issues",
+    "email": "cyrboard@cyrnix.dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CyrnixLab/cyrboard-local-agent.git"
+  },
+  "keywords": [
+    "cyrnix",
+    "cyrboard",
+    "tracker",
+    "local-agent",
+    "mcp",
+    "codex",
+    "claude"
+  ],
+  "bin": {
+    "cyrboard-local-agent": "./bin/cyrboard-local-agent.js",
+    "cyrnixlab-local-agent": "./bin/cyrboard-local-agent.js",
+    "cyrnix-local-agent": "./bin/cyrboard-local-agent.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "node --test",
+    "smoke": "node ./bin/cyrboard-local-agent.js --help",
+    "pack:dry-run": "npm pack --dry-run",
+    "prepublishOnly": "npm test && npm run smoke"
+  }
+}
