@@ -23,6 +23,23 @@ export async function runAgent(config, job, repoPath) {
 }
 
 function buildPrompt(job) {
+  const mcpLines = [];
+
+  if (job.mcp?.endpoint && job.mcp?.token) {
+    mcpLines.push(
+      '## Tracker MCP',
+      '',
+      `Endpoint: ${job.mcp.endpoint}`,
+      `Scopes: ${(job.mcp.scopes || []).join(', ') || '-'}`,
+      `Token env: CYRBOARD_MCP_TOKEN`,
+      '',
+      'Use Tracker MCP when you need to read the tracker state or propose/apply tracker changes for this job.',
+      'Call it as JSON-RPC over HTTP POST with `Authorization: Bearer $CYRBOARD_MCP_TOKEN`.',
+      'Do not print the token in logs, comments, artifacts, or commits.',
+      '',
+    );
+  }
+
   return [
     `# Cyrboard Tracker Job #${job.id}`,
     '',
@@ -42,6 +59,7 @@ function buildPrompt(job) {
     JSON.stringify(job.input || {}, null, 2),
     '```',
     '',
+    ...mcpLines,
   ].join('\n');
 }
 
@@ -86,7 +104,7 @@ async function runCommandAgent(config, job, repoPath, promptPath, resultPath) {
 }
 
 function buildJobEnv(config, job, promptPath, resultPath) {
-  return {
+  const env = {
     ...process.env,
     CYRBOARD_SERVER: config.serverUrl,
     CYRBOARD_PROJECT_ID: String(job.projectId),
@@ -97,6 +115,26 @@ function buildJobEnv(config, job, promptPath, resultPath) {
     CYRBOARD_JOB_PROMPT_PATH: promptPath,
     CYRBOARD_JOB_RESULT_PATH: resultPath,
   };
+
+  if (job.mcp?.endpoint && job.mcp?.token) {
+    env.CYRBOARD_MCP_ENDPOINT = resolveMcpEndpoint(config.serverUrl, job.mcp.endpoint);
+    env.CYRBOARD_MCP_TOKEN = String(job.mcp.token);
+    env.CYRBOARD_MCP_TOKEN_ID = String(job.mcp.tokenId || '');
+    env.CYRBOARD_MCP_SCOPES = (job.mcp.scopes || []).join(',');
+    env.CYRBOARD_MCP_EXPIRES_AFTER_LAST_HEARTBEAT_SECONDS = String(job.mcp.expiresAfterLastHeartbeatSeconds || '');
+  }
+
+  return env;
+}
+
+function resolveMcpEndpoint(serverUrl, endpoint) {
+  const normalizedEndpoint = String(endpoint || '').trim();
+
+  if (normalizedEndpoint.startsWith('http://') || normalizedEndpoint.startsWith('https://')) {
+    return normalizedEndpoint;
+  }
+
+  return new URL(normalizedEndpoint || '/tracker/mcp', `${String(serverUrl).replace(/\/+$/, '')}/`).toString();
 }
 
 function trimSummary(value) {
