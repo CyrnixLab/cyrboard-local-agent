@@ -51,6 +51,8 @@ async function connect(args) {
   const label = optionalString(args, 'label', `${process.platform} local agent`);
   const command = optionalString(args, 'command', '');
   const sandbox = optionalString(args, 'sandbox', 'workspace-write');
+  const shouldStart = args.start === true;
+  const intervalSeconds = optionalInt(args, 'interval', 10);
 
   if (projectId <= 0) {
     throw new UsageError('Missing required --project-id.');
@@ -89,6 +91,12 @@ async function connect(args) {
   if (!(await isLocalConfigIgnored(repoPath))) {
     console.warn('Warning: add .cyrboard/ to this repository .gitignore before committing.');
   }
+
+  if (shouldStart) {
+    await startLoop(await loadConfig(repoPath), repoPath, intervalSeconds);
+  } else {
+    console.log('Run `cyrnixlab-local-agent start --repo . --interval 10` to process jobs.');
+  }
 }
 
 async function runFromConfig(args, once) {
@@ -112,6 +120,9 @@ async function status(args) {
   console.log(`Project ID: ${config.projectId}`);
   console.log(`Runner ID: ${config.runnerId}`);
   console.log(`Agent: ${config.agent}`);
+  console.log(`Config: ${repoPath}/.cyrboard/local-agent.json`);
+  console.log('Status only reads local config; it does not start polling.');
+  console.log('To process jobs, run: cyrnixlab-local-agent start --repo . --interval 10');
 }
 
 async function disconnect(args) {
@@ -125,7 +136,7 @@ function printHelp() {
   console.log(`Cyrnix Lab Local Agent
 
 Usage:
-  cyrnixlab-local-agent connect --server <url> --project-id <id> --token <setup-token> [--repo .] [--agent codex]
+  cyrnixlab-local-agent connect --server <url> --project-id <id> --token <setup-token> [--repo .] [--agent codex] [--start] [--interval 10]
   cyrnixlab-local-agent run-once [--repo .]
   cyrnixlab-local-agent start [--repo .] [--interval 10]
   cyrnixlab-local-agent status [--repo .]

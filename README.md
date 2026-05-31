@@ -23,12 +23,18 @@ npx @cyrnixlab/cyrboard-local-agent connect \
   --project-id 1 \
   --token cyr_mcp_xxx \
   --repo . \
-  --agent codex
+  --agent codex \
+  --start \
+  --interval 10
 ```
 
 The setup token is short-lived and is not stored. After registration the local
 config stores only the runner token in `.cyrboard/local-agent.json` with `0600`
 permissions.
+
+With `--start`, the command stays in the foreground and keeps polling Tracker
+for queued `local_mcp` jobs. Keep the terminal open while this runner should
+process jobs.
 
 ## Run
 
@@ -40,6 +46,12 @@ For a single claim/execute/report cycle:
 
 ```bash
 npx @cyrnixlab/cyrboard-local-agent run-once
+```
+
+To verify local configuration without starting the polling loop:
+
+```bash
+npx @cyrnixlab/cyrboard-local-agent status
 ```
 
 ## Agent modes

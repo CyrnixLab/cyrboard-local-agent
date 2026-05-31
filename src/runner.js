@@ -1,12 +1,15 @@
 import { clearInterval, setInterval } from 'node:timers';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runAgent } from './agents.js';
+import { redactSecrets } from './redact.js';
 import { TrackerClient } from './tracker-client.js';
 
 const JOB_HEARTBEAT_INTERVAL_MS = 30_000;
+const MAX_RETRY_DELAY_SECONDS = 60;
 
-export async function runOnce(config, repoPath) {
-  const client = new TrackerClient(config.serverUrl);
+export async function runOnce(config, repoPath, options = {}) {
+  const client = options.client || new TrackerClient(config.serverUrl);
+  const agentRunner = options.agentRunner || runAgent;
   const claim = await client.claim(config.runnerToken);
   const job = claim.job || null;
 
@@ -26,7 +29,7 @@ export async function runOnce(config, repoPath) {
     });
     heartbeatTimer = startJobHeartbeat(client, config.runnerToken, job.id);
 
-    const result = await runAgent(config, job, repoPath);
+    const result = await agentRunner(config, job, repoPath);
 
     heartbeatTimer = stopJobHeartbeat(heartbeatTimer);
     await client.heartbeat(config.runnerToken, {
@@ -45,10 +48,15 @@ export async function runOnce(config, repoPath) {
     stopJobHeartbeat(heartbeatTimer);
     const message = error instanceof Error ? error.message : String(error);
 
-    await client.fail(config.runnerToken, {
-      jobId: job.id,
-      errorMessage: message,
-    });
+    try {
+      await client.fail(config.runnerToken, {
+        jobId: job.id,
+        errorMessage: message,
+      });
+    } catch (failError) {
+      const failMessage = failError instanceof Error ? failError.message : String(failError);
+      console.warn(redactSecrets(`Failed to report job #${job.id} failure: ${failMessage}`));
+    }
 
     throw error;
   }
@@ -78,11 +86,39 @@ function stopJobHeartbeat(timer) {
   return null;
 }
 
-export async function startLoop(config, repoPath, intervalSeconds) {
-  console.log(`Local agent started. Poll interval: ${intervalSeconds}s.`);
+export async function startLoop(config, repoPath, intervalSeconds, options = {}) {
+  const logger = options.logger || console;
+  const runOnceFn = options.runOnce || runOnce;
+  const delayFn = options.delay || delay;
+  const maxIterations = Number.isSafeInteger(options.maxIterations) ? options.maxIterations : Number.POSITIVE_INFINITY;
+  let iteration = 0;
+  let consecutiveFailures = 0;
 
-  while (true) {
-    await runOnce(config, repoPath);
-    await delay(intervalSeconds * 1000);
+  logger.log(`Local agent started. Poll interval: ${intervalSeconds}s.`);
+  logger.log('Keep this terminal open to process Cyrboard local_mcp jobs.');
+
+  while (iteration < maxIterations) {
+    iteration += 1;
+
+    try {
+      await runOnceFn(config, repoPath);
+      consecutiveFailures = 0;
+    } catch (error) {
+      consecutiveFailures += 1;
+      const message = error instanceof Error ? error.message : String(error);
+
+      logger.warn(redactSecrets(`Local agent iteration failed: ${message}`));
+    }
+
+    const retryDelaySeconds = retryDelay(intervalSeconds, consecutiveFailures);
+    await delayFn(retryDelaySeconds * 1000);
   }
+}
+
+function retryDelay(intervalSeconds, consecutiveFailures) {
+  if (consecutiveFailures <= 0) {
+    return intervalSeconds;
+  }
+
+  return Math.min(MAX_RETRY_DELAY_SECONDS, intervalSeconds * 2 ** Math.min(consecutiveFailures - 1, 4));
 }
