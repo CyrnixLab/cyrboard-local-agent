@@ -13,7 +13,7 @@ test('saveConfig writes reloadable private config', async () => {
     projectId: 1,
     runnerId: 2,
     runnerToken: 'cyr_runner_test',
-    agent: 'command',
+    agent: 'codex',
   };
 
   await saveConfig(repo, config);

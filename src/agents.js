@@ -1,6 +1,5 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { runProcess } from './process.js';
 
 export async function runAgent(config, job, repoPath) {
   const workspaceDir = resolve(repoPath, '.cyrboard', 'jobs');
@@ -15,8 +14,8 @@ export async function runAgent(config, job, repoPath) {
     return runCodexAgent(config, job, repoPath, promptPath, resultPath);
   }
 
-  if (config.agent === 'command') {
-    return runCommandAgent(config, job, repoPath, promptPath, resultPath);
+  if (config.agent === 'claude') {
+    return runClaudeAgent(config, job, repoPath, promptPath, resultPath);
   }
 
   throw new Error(`Unsupported agent mode: ${config.agent}`);
@@ -73,8 +72,21 @@ async function runCodexAgent(config, job, repoPath, promptPath, resultPath) {
     config.sandbox || 'workspace-write',
     '--output-last-message',
     resultPath,
-    '-',
   ];
+
+  const model = resolveModel(config, job);
+  const reasoning = resolveReasoning(config, job);
+
+  if (model) {
+    args.push('--model', model);
+  }
+
+  if (reasoning) {
+    args.push('-c', `model_reasoning_effort="${reasoning}"`);
+  }
+
+  args.push('-');
+
   const env = buildJobEnv(config, job, promptPath, resultPath);
   const prompt = await import('node:fs/promises').then((fs) => fs.readFile(promptPath, 'utf8'));
   const result = await runWithInput('codex', args, prompt, { cwd: repoPath, env });
@@ -85,22 +97,60 @@ async function runCodexAgent(config, job, repoPath, promptPath, resultPath) {
   };
 }
 
-async function runCommandAgent(config, job, repoPath, promptPath, resultPath) {
-  if (!config.command) {
-    throw new Error('Command agent requires --command.');
+async function runClaudeAgent(config, job, repoPath, promptPath, resultPath) {
+  const args = [
+    '--print',
+    '--output-format',
+    'text',
+    '--permission-mode',
+    config.permissionMode || 'acceptEdits',
+    '--add-dir',
+    repoPath,
+  ];
+
+  const model = resolveModel(config, job);
+  const reasoning = resolveReasoning(config, job);
+
+  if (model) {
+    args.push('--model', model);
+  }
+
+  if (reasoning) {
+    args.push('--effort', reasoning);
   }
 
   const env = buildJobEnv(config, job, promptPath, resultPath);
-  const result = await runProcess(config.command, [], {
-    cwd: repoPath,
-    env,
-    shell: true,
-  });
+  const prompt = await import('node:fs/promises').then((fs) => fs.readFile(promptPath, 'utf8'));
+  const result = await runWithInput('claude', args, prompt, { cwd: repoPath, env });
+
+  await import('node:fs/promises').then((fs) => fs.writeFile(resultPath, result.stdout || '', { mode: 0o600 }));
 
   return {
-    summary: trimSummary(result.stdout || `Command agent completed job #${job.id}.`),
+    summary: trimSummary(result.stdout || result.stderr || `Claude completed job #${job.id}.`),
     resultPath,
   };
+}
+
+function resolveModel(config, job) {
+  const fromJob = job.input?.modelCode;
+  const fromConfig = config.model;
+  const value = typeof fromJob === 'string' && fromJob.trim() !== '' ? fromJob : fromConfig;
+
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+function resolveReasoning(config, job) {
+  const fromJob = job.input?.reasoningEffort;
+  const fromConfig = config.reasoning;
+  const value = typeof fromJob === 'string' && fromJob.trim() !== '' ? fromJob : fromConfig;
+
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const normalized = value.trim();
+
+  return ['low', 'medium', 'high', 'xhigh'].includes(normalized) ? normalized : null;
 }
 
 function buildJobEnv(config, job, promptPath, resultPath) {

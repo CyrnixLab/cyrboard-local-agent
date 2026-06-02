@@ -24,6 +24,8 @@ npx @cyrnixlab/cyrboard-local-agent connect \
   --token cyr_mcp_xxx \
   --repo . \
   --agent codex \
+  --model gpt-5.2-codex \
+  --reasoning xhigh \
   --start \
   --interval 10
 ```
@@ -57,19 +59,17 @@ npx @cyrnixlab/cyrboard-local-agent status
 ## Agent modes
 
 - `codex`: runs `codex exec` in the repository.
-- `command`: runs an explicit command. Useful for controlled smoke tests.
+- `claude`: runs Claude Code in the repository.
 
-Command mode example:
+`--model` and `--reasoning` are optional local defaults. Tracker job input can
+override them per AI executor/job.
 
-```bash
-npx @cyrnixlab/cyrboard-local-agent connect \
-  --server http://localhost:8182 \
-  --project-id 1 \
-  --token cyr_mcp_xxx \
-  --repo . \
-  --agent command \
-  --command "node ./scripts/local-agent-smoke.js"
-```
+Supported reasoning values:
+
+- `low`
+- `medium`
+- `high`
+- `xhigh`
 
 The child process receives:
 

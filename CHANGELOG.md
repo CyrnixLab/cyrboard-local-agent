@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.4 - 2026-06-02
+
+- Removed the unsafe `command` execution mode.
+- Added `claude` local execution mode for Claude Code.
+- Added per-runner and per-job model/reasoning selection for Codex and Claude.
+
 ## 0.1.3 - 2026-05-31
 
 - Added `connect --start` to register a runner and immediately enter the polling loop.

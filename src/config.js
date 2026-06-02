@@ -30,6 +30,10 @@ export async function loadConfig(repoPath) {
     throw new Error('Local agent config is invalid.');
   }
 
+  if (parsed.agent === 'command') {
+    throw new Error('Command agent mode is no longer supported. Reconnect this runner with --agent codex or --agent claude.');
+  }
+
   return parsed;
 }
 

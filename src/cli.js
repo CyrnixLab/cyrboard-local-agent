@@ -49,8 +49,9 @@ async function connect(args) {
   const repoPath = resolveRepoPath(optionalString(args, 'repo', '.'));
   const agent = optionalString(args, 'agent', 'codex');
   const label = optionalString(args, 'label', `${process.platform} local agent`);
-  const command = optionalString(args, 'command', '');
   const sandbox = optionalString(args, 'sandbox', 'workspace-write');
+  const model = optionalString(args, 'model', '');
+  const reasoning = optionalString(args, 'reasoning', '');
   const shouldStart = args.start === true;
   const intervalSeconds = optionalInt(args, 'interval', 10);
 
@@ -58,12 +59,8 @@ async function connect(args) {
     throw new UsageError('Missing required --project-id.');
   }
 
-  if (!['codex', 'command'].includes(agent)) {
-    throw new UsageError('--agent must be codex or command.');
-  }
-
-  if (agent === 'command' && command === '') {
-    throw new UsageError('--command is required for command agent mode.');
+  if (!['codex', 'claude'].includes(agent)) {
+    throw new UsageError('--agent must be codex or claude.');
   }
 
   const client = new TrackerClient(serverUrl);
@@ -81,8 +78,9 @@ async function connect(args) {
     runnerToken: registered.rawToken,
     label,
     agent,
-    command,
     sandbox,
+    model,
+    reasoning,
   });
 
   console.log(`Local runner #${registered.runnerId} connected.`);
@@ -120,6 +118,12 @@ async function status(args) {
   console.log(`Project ID: ${config.projectId}`);
   console.log(`Runner ID: ${config.runnerId}`);
   console.log(`Agent: ${config.agent}`);
+  if (config.model) {
+    console.log(`Model: ${config.model}`);
+  }
+  if (config.reasoning) {
+    console.log(`Reasoning: ${config.reasoning}`);
+  }
   console.log(`Config: ${repoPath}/.cyrboard/local-agent.json`);
   console.log('Status only reads local config; it does not start polling.');
   console.log('To process jobs, run: cyrnixlab-local-agent start --repo . --interval 10');
@@ -136,7 +140,7 @@ function printHelp() {
   console.log(`Cyrnix Lab Local Agent
 
 Usage:
-  cyrnixlab-local-agent connect --server <url> --project-id <id> --token <setup-token> [--repo .] [--agent codex] [--start] [--interval 10]
+  cyrnixlab-local-agent connect --server <url> --project-id <id> --token <setup-token> [--repo .] [--agent codex|claude] [--model <model>] [--reasoning <effort>] [--start] [--interval 10]
   cyrnixlab-local-agent run-once [--repo .]
   cyrnixlab-local-agent start [--repo .] [--interval 10]
   cyrnixlab-local-agent status [--repo .]
@@ -144,7 +148,10 @@ Usage:
 
 Agent modes:
   codex      Run codex exec locally.
-  command    Run an explicit shell command, intended for controlled smoke tests.
+  claude     Run Claude Code locally.
+
+Reasoning efforts:
+  low, medium, high, xhigh
 `);
 }
 
