@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.5 - 2026-06-02
+
+- Improved missing Codex/Claude CLI diagnostics for local jobs.
+
 ## 0.1.4 - 2026-06-02
 
 - Removed the unsafe `command` execution mode.

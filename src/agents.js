@@ -63,6 +63,7 @@ function buildPrompt(job) {
 }
 
 async function runCodexAgent(config, job, repoPath, promptPath, resultPath) {
+  const command = 'codex';
   const args = [
     'exec',
     '--cd',
@@ -89,7 +90,7 @@ async function runCodexAgent(config, job, repoPath, promptPath, resultPath) {
 
   const env = buildJobEnv(config, job, promptPath, resultPath);
   const prompt = await import('node:fs/promises').then((fs) => fs.readFile(promptPath, 'utf8'));
-  const result = await runWithInput('codex', args, prompt, { cwd: repoPath, env });
+  const result = await runWithInput(command, args, prompt, { cwd: repoPath, env });
 
   return {
     summary: trimSummary(result.stdout || result.stderr || `Codex completed job #${job.id}.`),
@@ -98,6 +99,7 @@ async function runCodexAgent(config, job, repoPath, promptPath, resultPath) {
 }
 
 async function runClaudeAgent(config, job, repoPath, promptPath, resultPath) {
+  const command = 'claude';
   const args = [
     '--print',
     '--output-format',
@@ -121,7 +123,7 @@ async function runClaudeAgent(config, job, repoPath, promptPath, resultPath) {
 
   const env = buildJobEnv(config, job, promptPath, resultPath);
   const prompt = await import('node:fs/promises').then((fs) => fs.readFile(promptPath, 'utf8'));
-  const result = await runWithInput('claude', args, prompt, { cwd: repoPath, env });
+  const result = await runWithInput(command, args, prompt, { cwd: repoPath, env });
 
   await import('node:fs/promises').then((fs) => fs.writeFile(resultPath, result.stdout || '', { mode: 0o600 }));
 
@@ -217,7 +219,14 @@ async function runWithInput(command, args, input, options = {}) {
       stderr += chunk.toString();
       process.stderr.write(chunk);
     });
-    child.on('error', reject);
+    child.on('error', (error) => {
+      if (error?.code === 'ENOENT') {
+        reject(new Error(formatMissingCommandMessage(command)));
+        return;
+      }
+
+      reject(error);
+    });
     child.on('close', (code) => {
       const result = { code: code ?? 0, stdout, stderr };
 
@@ -232,4 +241,16 @@ async function runWithInput(command, args, input, options = {}) {
     });
     child.stdin.end(input);
   });
+}
+
+function formatMissingCommandMessage(command) {
+  if (command === 'codex') {
+    return 'Codex CLI not found. Install Codex CLI and make sure `codex` is available in PATH for the terminal that runs cyrboard-local-agent.';
+  }
+
+  if (command === 'claude') {
+    return 'Claude Code CLI not found. Install Claude Code and make sure `claude` is available in PATH for the terminal that runs cyrboard-local-agent.';
+  }
+
+  return `${command} command not found. Make sure it is installed and available in PATH.`;
 }
