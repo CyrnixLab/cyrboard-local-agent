@@ -7,20 +7,214 @@ export async function runAgent(config, job, repoPath) {
   const promptPath = resolve(workspaceDir, `${job.id}-prompt.md`);
   const resultPath = resolve(workspaceDir, `${job.id}-result.md`);
   const executionRepoPath = await prepareExecutionRepo(config, job, repoPath);
+  const prepareResult = await prepareJobGitState(config, job, executionRepoPath);
   const prompt = buildPrompt(job);
 
   await mkdir(workspaceDir, { recursive: true, mode: 0o700 });
   await writeFile(promptPath, prompt, { mode: 0o600 });
 
   if (config.agent === 'codex') {
-    return runCodexAgent(config, job, executionRepoPath, promptPath, resultPath);
+    const result = await runCodexAgent(config, job, executionRepoPath, promptPath, resultPath);
+    const finalizeResult = await finalizeExecutionRepo(config, job, executionRepoPath);
+
+    return appendGitResult(result, prepareResult, finalizeResult);
   }
 
   if (config.agent === 'claude') {
-    return runClaudeAgent(config, job, executionRepoPath, promptPath, resultPath);
+    const result = await runClaudeAgent(config, job, executionRepoPath, promptPath, resultPath);
+    const finalizeResult = await finalizeExecutionRepo(config, job, executionRepoPath);
+
+    return appendGitResult(result, prepareResult, finalizeResult);
   }
 
   throw new Error(`Unsupported agent mode: ${config.agent}`);
+}
+
+export async function prepareJobGitState(config, job, repoPath) {
+  const branchName = normalizeBranchName(job.branchName);
+
+  if (branchName === '' || config.branchIsolation === false) {
+    return { mergedBranches: [], conflicts: [], remoteBranchCreated: false };
+  }
+
+  const remoteBranchCreated = await ensureRemoteBranch(repoPath, branchName);
+  const childBranches = parseChildBranches(job.promptText || '').filter((childBranch) => childBranch !== branchName);
+  const mergedBranches = [];
+  const conflicts = [];
+
+  for (const childBranch of childBranches) {
+    await runCommand('git', ['fetch', 'origin', `${childBranch}:refs/remotes/origin/${childBranch}`], { cwd: repoPath, silent: true });
+
+    try {
+      await runCommand('git', ['merge', '--no-edit', `origin/${childBranch}`], { cwd: repoPath, silent: true });
+      mergedBranches.push(childBranch);
+    } catch (error) {
+      conflicts.push(childBranch);
+      break;
+    }
+  }
+
+  return { mergedBranches, conflicts, remoteBranchCreated };
+}
+
+export async function finalizeExecutionRepo(config, job, repoPath) {
+  const branchName = normalizeBranchName(job.branchName);
+
+  if (branchName === '' || config.branchIsolation === false) {
+    return { pushed: false, committed: false, commitSha: null, branchName: null, mergedBranches: [] };
+  }
+
+  await runCommand('git', ['fetch', 'origin', branchName], { cwd: repoPath, silent: true }).catch(() => {});
+  const initialRemoteSha = await gitOutputOrNull(repoPath, ['rev-parse', `origin/${branchName}`]);
+
+  await runCommand('git', ['add', '-A'], { cwd: repoPath, silent: true });
+  await assertNoConflictMarkers(repoPath);
+
+  let committed = false;
+
+  if (!(await gitSucceeds(repoPath, ['diff', '--cached', '--quiet']))) {
+    await runCommand('git', ['commit', '-m', buildCommitMessage(job)], { cwd: repoPath, silent: true });
+    committed = true;
+  }
+
+  const mergeResult = await mergeUnmergedChildBranches(job, repoPath, branchName);
+  const commitSha = await gitOutput(repoPath, ['rev-parse', 'HEAD']);
+
+  if (initialRemoteSha === commitSha) {
+    return { pushed: false, committed, commitSha, branchName, mergedBranches: mergeResult.mergedBranches };
+  }
+
+  await runCommand('git', ['push', 'origin', `HEAD:${branchName}`], { cwd: repoPath, silent: true });
+
+  return { pushed: true, committed: committed || mergeResult.mergedBranches.length > 0, commitSha, branchName, mergedBranches: mergeResult.mergedBranches };
+}
+
+function appendGitResult(result, prepareResult, finalizeResult) {
+  const lines = [];
+  const mergedBranches = [
+    ...(prepareResult.mergedBranches || []),
+    ...(finalizeResult.mergedBranches || []),
+  ];
+
+  if (prepareResult.remoteBranchCreated) {
+    lines.push(`Remote branch created: ${finalizeResult.branchName || 'unknown'}`);
+  }
+
+  if (mergedBranches.length > 0) {
+    lines.push(`Child branches merged: ${[...new Set(mergedBranches)].join(', ')}`);
+  }
+
+  if ((prepareResult.conflicts || []).length > 0) {
+    lines.push(`Merge conflicts prepared for agent resolution: ${prepareResult.conflicts.join(', ')}`);
+  }
+
+  if (finalizeResult.committed) {
+    lines.push(`Runner finalized commit: ${finalizeResult.commitSha}`);
+  }
+
+  if (finalizeResult.pushed) {
+    lines.push(`Runner pushed branch ${finalizeResult.branchName}: ${finalizeResult.commitSha}`);
+  }
+
+  if (lines.length === 0) {
+    return result;
+  }
+
+  const gitNote = ['Runner git finalization:', ...lines.map((line) => `- ${line}`)].join('\n');
+
+  return {
+    ...result,
+    summary: redactSecrets(trimSummary([result.summary, gitNote].filter(Boolean).join('\n\n'))),
+    resultText: redactSecrets([result.resultText, gitNote].filter(Boolean).join('\n\n')),
+  };
+}
+
+function normalizeBranchName(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+async function ensureRemoteBranch(repoPath, branchName) {
+  if (await gitSucceeds(repoPath, ['ls-remote', '--exit-code', '--heads', 'origin', branchName])) {
+    return false;
+  }
+
+  await runCommand('git', ['push', 'origin', `HEAD:${branchName}`], { cwd: repoPath, silent: true });
+
+  return true;
+}
+
+function parseChildBranches(promptText) {
+  const branches = new Set();
+
+  for (const line of String(promptText || '').split(/\r?\n/)) {
+    const match = line.match(/^\s*-\s+[^:]+:\s+(tracker\/[^\s]+)\s*$/);
+
+    if (match) {
+      branches.add(match[1]);
+    }
+  }
+
+  return [...branches];
+}
+
+async function mergeUnmergedChildBranches(job, repoPath, branchName) {
+  const childBranches = parseChildBranches(job.promptText || '').filter((childBranch) => childBranch !== branchName);
+  const mergedBranches = [];
+
+  for (const childBranch of childBranches) {
+    await runCommand('git', ['fetch', 'origin', `${childBranch}:refs/remotes/origin/${childBranch}`], { cwd: repoPath, silent: true });
+
+    if (await gitSucceeds(repoPath, ['merge-base', '--is-ancestor', `origin/${childBranch}`, 'HEAD'])) {
+      continue;
+    }
+
+    try {
+      await runCommand('git', ['merge', '--no-edit', `origin/${childBranch}`], { cwd: repoPath, silent: true });
+      mergedBranches.push(childBranch);
+    } catch (error) {
+      throw new Error(`Merge conflict remains unresolved for child branch ${childBranch}. ${error.message}`);
+    }
+  }
+
+  return { mergedBranches };
+}
+
+async function assertNoConflictMarkers(repoPath) {
+  const unmergedFiles = await gitOutput(repoPath, ['diff', '--name-only', '--diff-filter=U']);
+
+  if (unmergedFiles !== '') {
+    throw new Error(`Merge conflict remains unresolved in files:\n${unmergedFiles}`);
+  }
+
+  const changedFiles = (await gitOutput(repoPath, ['diff', '--cached', '--name-only', '--diff-filter=ACMRT']))
+    .split('\n')
+    .map((file) => file.trim())
+    .filter((file) => file !== '');
+  const conflictFiles = [];
+  const conflictBlockPattern = /^<<<<<<<[^\n]*\n[\s\S]*?^=======$[\s\S]*?^>>>>>>>[^\n]*$/m;
+
+  for (const file of changedFiles) {
+    const content = await readFile(resolve(repoPath, file), 'utf8').catch(() => '');
+
+    if (conflictBlockPattern.test(content)) {
+      conflictFiles.push(file);
+    }
+  }
+
+  if (conflictFiles.length > 0) {
+    throw new Error(`Merge conflict markers remain in files:\n${conflictFiles.join('\n')}`);
+  }
+}
+
+function buildCommitMessage(job) {
+  const issueKey = typeof job.input?.issueKey === 'string' ? job.input.issueKey.trim() : '';
+  const jobKind = typeof job.jobKind === 'string' && job.jobKind.trim() !== '' ? job.jobKind.trim() : 'job';
+
+  if (issueKey !== '') {
+    return `Cyrboard ${jobKind} ${issueKey} job ${job.id}`;
+  }
+
+  return `Cyrboard ${jobKind} job ${job.id}`;
 }
 
 export async function prepareExecutionRepo(config, job, repoPath) {
@@ -54,6 +248,19 @@ export async function prepareExecutionRepo(config, job, repoPath) {
 
 function buildPrompt(job) {
   const mcpLines = [];
+  const gitLines = [];
+
+  if (normalizeBranchName(job.branchName) !== '') {
+    gitLines.push(
+      '## Runner Git Lifecycle',
+      '',
+      `The local runner checked out branch ${job.branchName} before starting this CLI session.`,
+      'Edit files and run checks. Do not rely on git commit or git push from inside the CLI sandbox.',
+      'After the CLI exits, the runner stages, validates, commits, and pushes the branch.',
+      'For epic merge/review jobs, the runner may pre-merge child branches from this prompt. If conflict markers are present, resolve the file contents and leave the worktree ready to commit.',
+      '',
+    );
+  }
 
   if (job.mcp?.endpoint && job.mcp?.token) {
     mcpLines.push(
@@ -89,6 +296,7 @@ function buildPrompt(job) {
     JSON.stringify(job.input || {}, null, 2),
     '```',
     '',
+    ...gitLines,
     ...mcpLines,
   ].join('\n');
 }

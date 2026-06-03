@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6 - 2026-06-03
+
+- Finalize isolated job branches in the runner after Codex/Claude exits: stage, validate, commit, and push the result branch.
+- Create missing remote job branches and pre-merge epic child branches for final epic review jobs.
+- Reject unresolved merge conflict markers before reporting a job as completed.
+
 ## 0.1.5 - 2026-06-02
 
 - Improved missing Codex/Claude CLI diagnostics for local jobs.

@@ -38,6 +38,12 @@ With `--start`, the command stays in the foreground and keeps polling Tracker
 for queued `local_mcp` jobs. Keep the terminal open while this runner should
 process jobs.
 
+For branch-based jobs, the runner works in an isolated clone under
+`.cyrboard/worktrees/`. Codex/Claude edits files and runs checks there; after the
+CLI exits, the runner stages, validates, commits, and pushes the configured job
+branch. For epic review jobs, the runner also creates the missing epic branch
+when needed and pre-merges child branches listed in the job prompt.
+
 ## Run
 
 ```bash
