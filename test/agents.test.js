@@ -1,36 +1,61 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runAgent } from '../src/agents.js';
+import { promisify } from 'node:util';
+import { prepareExecutionRepo } from '../src/agents.js';
 
-test('runAgent reports missing Codex CLI with actionable message', async () => {
-  const repo = await mkdtemp(join(tmpdir(), 'cyrboard-local-agent-'));
-  const originalPath = process.env.PATH;
-  process.env.PATH = '/tmp/cyrboard-local-agent-missing-bin';
+const execFileAsync = promisify(execFile);
+
+test('prepareExecutionRepo checks out the requested remote branch in an isolated clone', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cyrboard-agent-'));
+  const originPath = join(root, 'origin.git');
+  const sourcePath = join(root, 'source');
 
   try {
-    await assert.rejects(
-      () => runAgent(
-        {
-          agent: 'codex',
-          serverUrl: 'https://tracker.example.com',
-        },
-        {
-          id: 1,
-          projectId: 1,
-          issueId: 1,
-          jobKind: 'plan',
-          commandId: 'cmd-test',
-          input: {},
-        },
-        repo,
-      ),
-      /Codex CLI not found/,
+    await git(['init', '--bare', originPath], root);
+    await git(['clone', originPath, sourcePath], root);
+    await git(['config', 'user.name', 'Cyrboard Test'], sourcePath);
+    await git(['config', 'user.email', 'test@example.com'], sourcePath);
+    await git(['switch', '-c', 'main'], sourcePath);
+    await writeFile(join(sourcePath, 'city.txt'), 'main\n');
+    await git(['add', 'city.txt'], sourcePath);
+    await git(['commit', '-m', 'Initial main'], sourcePath);
+    await git(['push', '-u', 'origin', 'main'], sourcePath);
+
+    await git(['switch', '-c', 'tracker/test-branch'], sourcePath);
+    await writeFile(join(sourcePath, 'city.txt'), 'branch\n');
+    await git(['commit', '-am', 'Branch change'], sourcePath);
+    await git(['push', '-u', 'origin', 'tracker/test-branch'], sourcePath);
+    await git(['switch', 'main'], sourcePath);
+
+    const preparedPath = await prepareExecutionRepo(
+      {},
+      {
+        id: 123,
+        branchName: 'tracker/test-branch',
+        input: { codexCloudBaseBranch: 'main' },
+      },
+      sourcePath,
     );
+
+    assert.notEqual(preparedPath, sourcePath);
+    assert.equal(await readFile(join(preparedPath, 'city.txt'), 'utf8'), 'branch\n');
+    assert.equal((await gitOutput(['branch', '--show-current'], preparedPath)).trim(), 'tracker/test-branch');
+    assert.equal(await readFile(join(sourcePath, 'city.txt'), 'utf8'), 'main\n');
   } finally {
-    process.env.PATH = originalPath;
-    await rm(repo, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   }
 });
+
+async function git(args, cwd) {
+  await execFileAsync('git', args, { cwd });
+}
+
+async function gitOutput(args, cwd) {
+  const result = await execFileAsync('git', args, { cwd });
+
+  return result.stdout;
+}

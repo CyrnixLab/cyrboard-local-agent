@@ -1,24 +1,55 @@
-import { mkdir, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { redactSecrets } from './redact.js';
 
 export async function runAgent(config, job, repoPath) {
   const workspaceDir = resolve(repoPath, '.cyrboard', 'jobs');
   const promptPath = resolve(workspaceDir, `${job.id}-prompt.md`);
   const resultPath = resolve(workspaceDir, `${job.id}-result.md`);
+  const executionRepoPath = await prepareExecutionRepo(config, job, repoPath);
   const prompt = buildPrompt(job);
 
   await mkdir(workspaceDir, { recursive: true, mode: 0o700 });
   await writeFile(promptPath, prompt, { mode: 0o600 });
 
   if (config.agent === 'codex') {
-    return runCodexAgent(config, job, repoPath, promptPath, resultPath);
+    return runCodexAgent(config, job, executionRepoPath, promptPath, resultPath);
   }
 
   if (config.agent === 'claude') {
-    return runClaudeAgent(config, job, repoPath, promptPath, resultPath);
+    return runClaudeAgent(config, job, executionRepoPath, promptPath, resultPath);
   }
 
   throw new Error(`Unsupported agent mode: ${config.agent}`);
+}
+
+export async function prepareExecutionRepo(config, job, repoPath) {
+  const branchName = typeof job.branchName === 'string' ? job.branchName.trim() : '';
+
+  if (branchName === '' || config.branchIsolation === false) {
+    return repoPath;
+  }
+
+  const remoteUrl = await gitOutput(repoPath, ['remote', 'get-url', 'origin']);
+  const worktreePath = resolve(repoPath, '.cyrboard', 'worktrees', String(job.id));
+
+  await rm(worktreePath, { recursive: true, force: true });
+  await mkdir(dirname(worktreePath), { recursive: true, mode: 0o700 });
+  await runCommand('git', ['clone', '--no-tags', remoteUrl, worktreePath], { cwd: repoPath, silent: true });
+  await copyGitIdentity(repoPath, worktreePath);
+
+  if (await gitSucceeds(worktreePath, ['ls-remote', '--exit-code', '--heads', 'origin', branchName])) {
+    await runCommand('git', ['fetch', 'origin', `${branchName}:refs/remotes/origin/${branchName}`], { cwd: worktreePath, silent: true });
+    await runCommand('git', ['switch', '-c', branchName, `origin/${branchName}`], { cwd: worktreePath, silent: true });
+
+    return worktreePath;
+  }
+
+  const baseBranch = resolveBaseBranch(config, job);
+  await runCommand('git', ['fetch', 'origin', baseBranch], { cwd: worktreePath, silent: true });
+  await runCommand('git', ['switch', '-c', branchName, `origin/${baseBranch}`], { cwd: worktreePath, silent: true });
+
+  return worktreePath;
 }
 
 function buildPrompt(job) {
@@ -91,9 +122,11 @@ async function runCodexAgent(config, job, repoPath, promptPath, resultPath) {
   const env = buildJobEnv(config, job, promptPath, resultPath);
   const prompt = await import('node:fs/promises').then((fs) => fs.readFile(promptPath, 'utf8'));
   const result = await runWithInput(command, args, prompt, { cwd: repoPath, env });
+  const resultText = redactSecrets(await readResultText(resultPath, result.stdout || result.stderr || ''));
 
   return {
-    summary: trimSummary(result.stdout || result.stderr || `Codex completed job #${job.id}.`),
+    summary: redactSecrets(trimSummary(result.stdout || result.stderr || `Codex completed job #${job.id}.`)),
+    resultText,
     resultPath,
   };
 }
@@ -126,11 +159,73 @@ async function runClaudeAgent(config, job, repoPath, promptPath, resultPath) {
   const result = await runWithInput(command, args, prompt, { cwd: repoPath, env });
 
   await import('node:fs/promises').then((fs) => fs.writeFile(resultPath, result.stdout || '', { mode: 0o600 }));
+  const resultText = redactSecrets(await readResultText(resultPath, result.stdout || result.stderr || ''));
 
   return {
-    summary: trimSummary(result.stdout || result.stderr || `Claude completed job #${job.id}.`),
+    summary: redactSecrets(trimSummary(result.stdout || result.stderr || `Claude completed job #${job.id}.`)),
+    resultText,
     resultPath,
   };
+}
+
+async function readResultText(resultPath, fallback) {
+  try {
+    const content = await readFile(resultPath, 'utf8');
+    const normalized = String(content || '').trim();
+
+    if (normalized !== '') {
+      return normalized;
+    }
+  } catch {
+    // Fall back to captured stdout/stderr when the CLI did not write the result file.
+  }
+
+  return String(fallback || '').trim();
+}
+
+function resolveBaseBranch(config, job) {
+  const fromJob = job.input?.codexCloudBaseBranch;
+  const fromConfig = config.baseBranch;
+  const value = typeof fromJob === 'string' && fromJob.trim() !== '' ? fromJob : fromConfig;
+
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : 'main';
+}
+
+async function copyGitIdentity(sourceRepoPath, targetRepoPath) {
+  const userName = await gitOutputOrNull(sourceRepoPath, ['config', '--get', 'user.name']);
+  const userEmail = await gitOutputOrNull(sourceRepoPath, ['config', '--get', 'user.email']);
+
+  if (userName !== null) {
+    await runCommand('git', ['config', 'user.name', userName], { cwd: targetRepoPath, silent: true });
+  }
+
+  if (userEmail !== null) {
+    await runCommand('git', ['config', 'user.email', userEmail], { cwd: targetRepoPath, silent: true });
+  }
+}
+
+async function gitSucceeds(repoPath, args) {
+  try {
+    await runCommand('git', args, { cwd: repoPath, silent: true });
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function gitOutputOrNull(repoPath, args) {
+  try {
+    return await gitOutput(repoPath, args);
+  } catch {
+    return null;
+  }
+}
+
+async function gitOutput(repoPath, args) {
+  const result = await runCommand('git', args, { cwd: repoPath, silent: true });
+
+  return String(result.stdout || '').trim();
 }
 
 function resolveModel(config, job) {
@@ -212,12 +307,14 @@ async function runWithInput(command, args, input, options = {}) {
     let stderr = '';
 
     child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString();
-      process.stdout.write(chunk);
+      const value = chunk.toString();
+      stdout += value;
+      process.stdout.write(redactSecrets(value));
     });
     child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-      process.stderr.write(chunk);
+      const value = chunk.toString();
+      stderr += value;
+      process.stderr.write(redactSecrets(value));
     });
     child.on('error', (error) => {
       if (error?.code === 'ENOENT') {
@@ -240,6 +337,57 @@ async function runWithInput(command, args, input, options = {}) {
       reject(error);
     });
     child.stdin.end(input);
+  });
+}
+
+async function runCommand(command, args, options = {}) {
+  const { spawn } = await import('node:child_process');
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env || process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (chunk) => {
+      const value = chunk.toString();
+      stdout += value;
+
+      if (!options.silent) {
+        process.stdout.write(redactSecrets(value));
+      }
+    });
+    child.stderr.on('data', (chunk) => {
+      const value = chunk.toString();
+      stderr += value;
+
+      if (!options.silent) {
+        process.stderr.write(redactSecrets(value));
+      }
+    });
+    child.on('error', (error) => {
+      if (error?.code === 'ENOENT') {
+        reject(new Error(formatMissingCommandMessage(command)));
+        return;
+      }
+
+      reject(error);
+    });
+    child.on('close', (code) => {
+      const result = { code: code ?? 0, stdout, stderr };
+
+      if (result.code === 0) {
+        resolve(result);
+        return;
+      }
+
+      const error = new Error(redactSecrets(`${command} ${args.join(' ')} exited with code ${result.code}: ${stderr || stdout}`));
+      error.result = result;
+      reject(error);
+    });
   });
 }
 

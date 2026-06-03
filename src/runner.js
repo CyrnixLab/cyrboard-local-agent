@@ -39,7 +39,8 @@ export async function runOnce(config, repoPath, options = {}) {
     });
     await client.complete(config.runnerToken, {
       jobId: job.id,
-      resultSummary: result.summary,
+      resultSummary: redactSecrets(result.summary),
+      resultText: redactSecrets(result.resultText || result.summary),
     });
 
     console.log(`Completed job #${job.id}.`);
@@ -51,7 +52,7 @@ export async function runOnce(config, repoPath, options = {}) {
     try {
       await client.fail(config.runnerToken, {
         jobId: job.id,
-        errorMessage: message,
+        errorMessage: redactSecrets(message),
       });
     } catch (failError) {
       const failMessage = failError instanceof Error ? failError.message : String(failError);
@@ -69,7 +70,7 @@ function startJobHeartbeat(client, runnerToken, jobId) {
       progressStage: 'local_agent_running',
     }).catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
-      console.warn(`Heartbeat failed for job #${jobId}: ${message}`);
+      console.warn(redactSecrets(`Heartbeat failed for job #${jobId}: ${message}`));
     });
   }, JOB_HEARTBEAT_INTERVAL_MS);
 
