@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.7 - 2026-06-04
+## 0.1.8 - 2026-06-04
 
 - Enable Codex `workspace-write` network access so local jobs can call Tracker MCP without switching to a broader sandbox.
 - Redact job-scoped MCP tokens such as `cyr_mcp_job_*` from CLI output, env dumps, JSON snippets, and authorization headers.
