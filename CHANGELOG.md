@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.7 - 2026-06-04
+
+- Enable Codex `workspace-write` network access so local jobs can call Tracker MCP without switching to a broader sandbox.
+- Redact job-scoped MCP tokens such as `cyr_mcp_job_*` from CLI output, env dumps, JSON snippets, and authorization headers.
+
 ## 0.1.6 - 2026-06-03
 
 - Finalize isolated job branches in the runner after Codex/Claude exits: stage, validate, commit, and push the result branch.

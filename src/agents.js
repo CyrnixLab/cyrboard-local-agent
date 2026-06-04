@@ -2,29 +2,61 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { redactSecrets } from './redact.js';
 
+const DEFAULT_MAX_MERGE_CONFLICT_AGENT_RUNS = 5;
+
+class MergeConflictNeedsAgentError extends Error {
+  constructor(childBranch, message, partialResult) {
+    super(message);
+    this.name = 'MergeConflictNeedsAgentError';
+    this.childBranch = childBranch;
+    this.partialResult = partialResult;
+  }
+}
+
 export async function runAgent(config, job, repoPath) {
   const workspaceDir = resolve(repoPath, '.cyrboard', 'jobs');
   const promptPath = resolve(workspaceDir, `${job.id}-prompt.md`);
   const resultPath = resolve(workspaceDir, `${job.id}-result.md`);
   const executionRepoPath = await prepareExecutionRepo(config, job, repoPath);
   const prepareResult = await prepareJobGitState(config, job, executionRepoPath);
-  const prompt = buildPrompt(job);
+  let prompt = buildPrompt(job);
 
   await mkdir(workspaceDir, { recursive: true, mode: 0o700 });
-  await writeFile(promptPath, prompt, { mode: 0o600 });
 
+  const agentResults = [];
+  const partialFinalizeResults = [];
+  const maxMergeConflictAgentRuns = resolveMaxMergeConflictAgentRuns(config);
+
+  for (let attempt = 1; attempt <= maxMergeConflictAgentRuns; attempt += 1) {
+    await writeFile(promptPath, prompt, { mode: 0o600 });
+    const result = await runConfiguredAgent(config, job, executionRepoPath, promptPath, resultPath);
+    agentResults.push(result);
+
+    try {
+      const finalizeResult = await finalizeExecutionRepo(config, job, executionRepoPath);
+      const combinedFinalizeResult = combineFinalizeResults([...partialFinalizeResults, finalizeResult]);
+
+      return appendGitResult(combineAgentResults(agentResults), prepareResult, combinedFinalizeResult);
+    } catch (error) {
+      if (!(error instanceof MergeConflictNeedsAgentError) || attempt >= maxMergeConflictAgentRuns) {
+        throw error;
+      }
+
+      partialFinalizeResults.push(error.partialResult);
+      prompt = buildMergeConflictContinuationPrompt(job, error, attempt + 1);
+    }
+  }
+
+  throw new Error(`Merge conflict was not resolved after ${maxMergeConflictAgentRuns} agent runs.`);
+}
+
+async function runConfiguredAgent(config, job, executionRepoPath, promptPath, resultPath) {
   if (config.agent === 'codex') {
-    const result = await runCodexAgent(config, job, executionRepoPath, promptPath, resultPath);
-    const finalizeResult = await finalizeExecutionRepo(config, job, executionRepoPath);
-
-    return appendGitResult(result, prepareResult, finalizeResult);
+    return await runCodexAgent(config, job, executionRepoPath, promptPath, resultPath);
   }
 
   if (config.agent === 'claude') {
-    const result = await runClaudeAgent(config, job, executionRepoPath, promptPath, resultPath);
-    const finalizeResult = await finalizeExecutionRepo(config, job, executionRepoPath);
-
-    return appendGitResult(result, prepareResult, finalizeResult);
+    return await runClaudeAgent(config, job, executionRepoPath, promptPath, resultPath);
   }
 
   throw new Error(`Unsupported agent mode: ${config.agent}`);
@@ -67,26 +99,43 @@ export async function finalizeExecutionRepo(config, job, repoPath) {
   await runCommand('git', ['fetch', 'origin', branchName], { cwd: repoPath, silent: true }).catch(() => {});
   const initialRemoteSha = await gitOutputOrNull(repoPath, ['rev-parse', `origin/${branchName}`]);
 
-  await runCommand('git', ['add', '-A'], { cwd: repoPath, silent: true });
-  await assertNoConflictMarkers(repoPath);
+  const partialResult = {
+    pushed: false,
+    committed: false,
+    commitSha: null,
+    branchName,
+    mergedBranches: [],
+  };
 
-  let committed = false;
-
-  if (!(await gitSucceeds(repoPath, ['diff', '--cached', '--quiet']))) {
-    await runCommand('git', ['commit', '-m', buildCommitMessage(job)], { cwd: repoPath, silent: true });
-    committed = true;
-  }
-
-  const mergeResult = await mergeUnmergedChildBranches(job, repoPath, branchName);
+  await stageAndCommitResolvedState(repoPath, job, partialResult);
+  const mergeResult = await mergeUnmergedChildBranches(job, repoPath, branchName, partialResult);
+  partialResult.mergedBranches.push(...mergeResult.mergedBranches);
+  await stageAndCommitResolvedState(repoPath, job, partialResult);
   const commitSha = await gitOutput(repoPath, ['rev-parse', 'HEAD']);
+  partialResult.commitSha = commitSha;
 
   if (initialRemoteSha === commitSha) {
-    return { pushed: false, committed, commitSha, branchName, mergedBranches: mergeResult.mergedBranches };
+    return partialResult;
   }
 
   await runCommand('git', ['push', 'origin', `HEAD:${branchName}`], { cwd: repoPath, silent: true });
+  partialResult.pushed = true;
 
-  return { pushed: true, committed: committed || mergeResult.mergedBranches.length > 0, commitSha, branchName, mergedBranches: mergeResult.mergedBranches };
+  return partialResult;
+}
+
+async function stageAndCommitResolvedState(repoPath, job, partialResult) {
+  await assertNoConflictMarkers(repoPath);
+  await runCommand('git', ['add', '-A'], { cwd: repoPath, silent: true });
+  await assertNoUnmergedFiles(repoPath);
+
+  if (await gitSucceeds(repoPath, ['diff', '--cached', '--quiet'])) {
+    return;
+  }
+
+  await runCommand('git', ['commit', '-m', buildCommitMessage(job)], { cwd: repoPath, silent: true });
+  partialResult.committed = true;
+  partialResult.commitSha = await gitOutput(repoPath, ['rev-parse', 'HEAD']);
 }
 
 function appendGitResult(result, prepareResult, finalizeResult) {
@@ -129,6 +178,54 @@ function appendGitResult(result, prepareResult, finalizeResult) {
   };
 }
 
+function combineAgentResults(results) {
+  if (results.length === 1) {
+    return results[0];
+  }
+
+  const latest = results[results.length - 1];
+  const resultText = results
+    .map((result, index) => [`Agent run #${index + 1}:`, result.resultText || result.summary || ''].join('\n'))
+    .join('\n\n');
+
+  return {
+    ...latest,
+    summary: latest.summary,
+    resultText: redactSecrets(resultText),
+  };
+}
+
+function combineFinalizeResults(results) {
+  const latest = results[results.length - 1] || {};
+  const mergedBranches = [];
+
+  for (const result of results) {
+    for (const branchName of result?.mergedBranches || []) {
+      if (!mergedBranches.includes(branchName)) {
+        mergedBranches.push(branchName);
+      }
+    }
+  }
+
+  return {
+    pushed: Boolean(latest.pushed),
+    committed: results.some((result) => result?.committed),
+    commitSha: latest.commitSha || null,
+    branchName: latest.branchName || null,
+    mergedBranches,
+  };
+}
+
+function resolveMaxMergeConflictAgentRuns(config) {
+  const value = Number(config.maxMergeConflictAgentRuns ?? config.mergeConflictAgentRuns ?? DEFAULT_MAX_MERGE_CONFLICT_AGENT_RUNS);
+
+  if (!Number.isFinite(value) || value < 1) {
+    return DEFAULT_MAX_MERGE_CONFLICT_AGENT_RUNS;
+  }
+
+  return Math.floor(value);
+}
+
 function normalizeBranchName(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -157,7 +254,7 @@ function parseChildBranches(promptText) {
   return [...branches];
 }
 
-async function mergeUnmergedChildBranches(job, repoPath, branchName) {
+async function mergeUnmergedChildBranches(job, repoPath, branchName, partialResult) {
   const childBranches = parseChildBranches(job.promptText || '').filter((childBranch) => childBranch !== branchName);
   const mergedBranches = [];
 
@@ -171,8 +268,15 @@ async function mergeUnmergedChildBranches(job, repoPath, branchName) {
     try {
       await runCommand('git', ['merge', '--no-edit', `origin/${childBranch}`], { cwd: repoPath, silent: true });
       mergedBranches.push(childBranch);
+      partialResult.mergedBranches.push(childBranch);
+      partialResult.committed = true;
+      partialResult.commitSha = await gitOutput(repoPath, ['rev-parse', 'HEAD']);
     } catch (error) {
-      throw new Error(`Merge conflict remains unresolved for child branch ${childBranch}. ${error.message}`);
+      throw new MergeConflictNeedsAgentError(
+        childBranch,
+        `Merge conflict remains unresolved for child branch ${childBranch}. ${error.message}`,
+        { ...partialResult, mergedBranches: [...partialResult.mergedBranches] },
+      );
     }
   }
 
@@ -180,16 +284,7 @@ async function mergeUnmergedChildBranches(job, repoPath, branchName) {
 }
 
 async function assertNoConflictMarkers(repoPath) {
-  const unmergedFiles = await gitOutput(repoPath, ['diff', '--name-only', '--diff-filter=U']);
-
-  if (unmergedFiles !== '') {
-    throw new Error(`Merge conflict remains unresolved in files:\n${unmergedFiles}`);
-  }
-
-  const changedFiles = (await gitOutput(repoPath, ['diff', '--cached', '--name-only', '--diff-filter=ACMRT']))
-    .split('\n')
-    .map((file) => file.trim())
-    .filter((file) => file !== '');
+  const changedFiles = await listChangedWorkingTreeFiles(repoPath);
   const conflictFiles = [];
   const conflictBlockPattern = /^<<<<<<<[^\n]*\n[\s\S]*?^=======$[\s\S]*?^>>>>>>>[^\n]*$/m;
 
@@ -204,6 +299,75 @@ async function assertNoConflictMarkers(repoPath) {
   if (conflictFiles.length > 0) {
     throw new Error(`Merge conflict markers remain in files:\n${conflictFiles.join('\n')}`);
   }
+}
+
+async function assertNoUnmergedFiles(repoPath) {
+  const unmergedFiles = await gitOutput(repoPath, ['diff', '--name-only', '--diff-filter=U']);
+
+  if (unmergedFiles !== '') {
+    throw new Error(`Merge conflict remains unresolved in files:\n${unmergedFiles}`);
+  }
+}
+
+async function listChangedWorkingTreeFiles(repoPath) {
+  const files = new Set();
+  const output = await gitOutput(repoPath, ['status', '--porcelain']);
+
+  for (const line of output.split('\n')) {
+    const file = line.slice(3).trim();
+
+    if (file !== '' && !file.includes(' -> ')) {
+      files.add(file);
+    }
+  }
+
+  for (const file of (await gitOutput(repoPath, ['diff', '--cached', '--name-only', '--diff-filter=ACMRT']))
+    .split('\n')
+    .map((file) => file.trim())
+    .filter((file) => file !== '')) {
+    files.add(file);
+  }
+
+  return [...files];
+}
+
+function buildMergeConflictContinuationPrompt(job, error, attempt) {
+  return [
+    `# Cyrboard Tracker Job #${job.id} merge conflict continuation #${attempt}`,
+    '',
+    `The previous agent run completed, but the runner hit another merge conflict while merging child branch: ${error.childBranch}.`,
+    '',
+    'Current worktree state:',
+    '- The runner has already checked out the job branch.',
+    '- Some child branches may already be merged and committed.',
+    '- Conflict markers may be present in the current files.',
+    '',
+    'Resolve the current conflict in the working tree.',
+    'Preserve the behavior from all completed child branches listed in the original job prompt.',
+    'Run the relevant checks before final answer.',
+    'Do not run `git add`, `git commit`, or `git push`; the runner will stage, commit, continue merging remaining child branches, and push after the CLI exits.',
+    '',
+    'If the conflict is not safely resolvable, the first line of your final answer must be exactly:',
+    'MERGE_CONFLICT_UNRESOLVED',
+    '',
+    'Original job prompt:',
+    '',
+    job.promptText || '',
+  ].join('\n');
+}
+
+function formatMcpEndpointForPrompt(job) {
+  const endpoint = String(job.mcp?.endpoint || '').trim();
+
+  if (endpoint === '') {
+    return '-';
+  }
+
+  if (endpoint.startsWith('http://') || endpoint.startsWith('https://')) {
+    return endpoint;
+  }
+
+  return `${endpoint} (resolved full URL is available in CYRBOARD_MCP_ENDPOINT)`;
 }
 
 function buildCommitMessage(job) {
@@ -266,12 +430,14 @@ function buildPrompt(job) {
     mcpLines.push(
       '## Tracker MCP',
       '',
-      `Endpoint: ${job.mcp.endpoint}`,
+      `Endpoint: ${formatMcpEndpointForPrompt(job)}`,
       `Scopes: ${(job.mcp.scopes || []).join(', ') || '-'}`,
       `Token env: CYRBOARD_MCP_TOKEN`,
+      `Resolved endpoint env: CYRBOARD_MCP_ENDPOINT`,
       '',
       'Use Tracker MCP when you need to read the tracker state or propose/apply tracker changes for this job.',
-      'Call it as JSON-RPC over HTTP POST with `Authorization: Bearer $CYRBOARD_MCP_TOKEN`.',
+      'Call the full URL in `CYRBOARD_MCP_ENDPOINT` as JSON-RPC over HTTP POST with `Authorization: Bearer $CYRBOARD_MCP_TOKEN`.',
+      'Do not concatenate CYRBOARD_SERVER with CYRBOARD_MCP_ENDPOINT; the env value is already absolute.',
       'Do not print the token in logs, comments, artifacts, or commits.',
       '',
     );
@@ -303,16 +469,35 @@ function buildPrompt(job) {
 
 async function runCodexAgent(config, job, repoPath, promptPath, resultPath) {
   const command = 'codex';
+  const args = buildCodexArgs(config, job, repoPath, resultPath);
+  const env = buildJobEnv(config, job, promptPath, resultPath);
+  const prompt = await import('node:fs/promises').then((fs) => fs.readFile(promptPath, 'utf8'));
+  const result = await runWithInput(command, args, prompt, { cwd: repoPath, env });
+  const resultText = redactSecrets(await readResultText(resultPath, result.stdout || result.stderr || ''));
+
+  return {
+    summary: redactSecrets(trimSummary(result.stdout || result.stderr || `Codex completed job #${job.id}.`)),
+    resultText,
+    resultPath,
+  };
+}
+
+export function buildCodexArgs(config, job, repoPath, resultPath) {
+  const sandbox = config.sandbox || 'workspace-write';
   const args = [
     'exec',
     '--cd',
     repoPath,
     '--skip-git-repo-check',
     '--sandbox',
-    config.sandbox || 'workspace-write',
+    sandbox,
     '--output-last-message',
     resultPath,
   ];
+
+  if (shouldEnableCodexWorkspaceNetwork(config, sandbox)) {
+    args.push('-c', 'sandbox_workspace_write.network_access=true');
+  }
 
   const model = resolveModel(config, job);
   const reasoning = resolveReasoning(config, job);
@@ -327,16 +512,15 @@ async function runCodexAgent(config, job, repoPath, promptPath, resultPath) {
 
   args.push('-');
 
-  const env = buildJobEnv(config, job, promptPath, resultPath);
-  const prompt = await import('node:fs/promises').then((fs) => fs.readFile(promptPath, 'utf8'));
-  const result = await runWithInput(command, args, prompt, { cwd: repoPath, env });
-  const resultText = redactSecrets(await readResultText(resultPath, result.stdout || result.stderr || ''));
+  return args;
+}
 
-  return {
-    summary: redactSecrets(trimSummary(result.stdout || result.stderr || `Codex completed job #${job.id}.`)),
-    resultText,
-    resultPath,
-  };
+function shouldEnableCodexWorkspaceNetwork(config, sandbox) {
+  if (config.codexNetworkAccess === false || config.networkAccess === false) {
+    return false;
+  }
+
+  return String(sandbox || '').trim() === 'workspace-write';
 }
 
 async function runClaudeAgent(config, job, repoPath, promptPath, resultPath) {

@@ -5,9 +5,46 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { finalizeExecutionRepo, prepareExecutionRepo, prepareJobGitState, runAgent } from '../src/agents.js';
+import { buildCodexArgs, finalizeExecutionRepo, prepareExecutionRepo, prepareJobGitState, runAgent } from '../src/agents.js';
 
 const execFileAsync = promisify(execFile);
+
+test('buildCodexArgs enables workspace-write network access for Tracker MCP', () => {
+  const args = buildCodexArgs(
+    {
+      sandbox: 'workspace-write',
+      model: 'gpt-5.5',
+      reasoning: 'xhigh',
+    },
+    { input: {} },
+    '/repo',
+    '/repo/.cyrboard/jobs/1-result.md',
+  );
+
+  assert.deepEqual(args.slice(0, 8), [
+    'exec',
+    '--cd',
+    '/repo',
+    '--skip-git-repo-check',
+    '--sandbox',
+    'workspace-write',
+    '--output-last-message',
+    '/repo/.cyrboard/jobs/1-result.md',
+  ]);
+  assert.ok(args.includes('sandbox_workspace_write.network_access=true'));
+  assert.deepEqual(args.slice(-5), ['--model', 'gpt-5.5', '-c', 'model_reasoning_effort="xhigh"', '-']);
+});
+
+test('buildCodexArgs does not force network config for non workspace-write sandbox', () => {
+  const args = buildCodexArgs(
+    { sandbox: 'danger-full-access' },
+    { input: {} },
+    '/repo',
+    '/repo/.cyrboard/jobs/1-result.md',
+  );
+
+  assert.equal(args.includes('sandbox_workspace_write.network_access=true'), false);
+});
 
 test('prepareExecutionRepo checks out the requested remote branch in an isolated clone', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cyrboard-agent-'));
@@ -216,6 +253,111 @@ test('runAgent keeps the source checkout clean and pushes fake Codex changes fro
     await git(['clone', originPath, verifyPath], root);
     await git(['switch', 'tracker/cott-103/dev-child'], verifyPath);
     assert.equal(await readFile(join(verifyPath, 'agent-output.txt'), 'utf8'), 'fake codex change\n');
+  } finally {
+    process.env.PATH = originalPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('runAgent continues agent runs for sequential epic merge conflicts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cyrboard-agent-'));
+  const originPath = join(root, 'origin.git');
+  const sourcePath = join(root, 'source');
+  const verifyPath = join(root, 'verify');
+  const fakeBinPath = join(root, 'bin');
+  const fakeCodexPath = join(fakeBinPath, 'codex');
+  const counterPath = join(root, 'codex-count');
+  const originalPath = process.env.PATH;
+
+  try {
+    await createMainRepository(originPath, sourcePath);
+
+    await git(['switch', '-c', 'tracker/cott-201/alpha'], sourcePath);
+    await writeFile(join(sourcePath, 'city.txt'), 'main\nalpha\n');
+    await git(['commit', '-am', 'Alpha child'], sourcePath);
+    await git(['push', '-u', 'origin', 'tracker/cott-201/alpha'], sourcePath);
+
+    await git(['switch', 'main'], sourcePath);
+    await git(['switch', '-c', 'tracker/cott-202/beta'], sourcePath);
+    await writeFile(join(sourcePath, 'city.txt'), 'main\nbeta\n');
+    await git(['commit', '-am', 'Beta child'], sourcePath);
+    await git(['push', '-u', 'origin', 'tracker/cott-202/beta'], sourcePath);
+
+    await git(['switch', 'main'], sourcePath);
+    await git(['switch', '-c', 'tracker/cott-203/gamma'], sourcePath);
+    await writeFile(join(sourcePath, 'city.txt'), 'main\ngamma\n');
+    await git(['commit', '-am', 'Gamma child'], sourcePath);
+    await git(['push', '-u', 'origin', 'tracker/cott-203/gamma'], sourcePath);
+    await git(['switch', 'main'], sourcePath);
+
+    await mkdir(fakeBinPath);
+    await writeFile(
+      fakeCodexPath,
+      [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        'result_path=""',
+        'while [ "$#" -gt 0 ]; do',
+        '  if [ "$1" = "--output-last-message" ]; then',
+        '    shift',
+        '    result_path="$1"',
+        '  fi',
+        '  shift || true',
+        'done',
+        'cat >/dev/null',
+        `count_file='${counterPath}'`,
+        'count=0',
+        'if [ -f "$count_file" ]; then count="$(cat "$count_file")"; fi',
+        'count=$((count + 1))',
+        'printf "%s" "$count" > "$count_file"',
+        'if [ "$count" = "1" ]; then',
+        '  printf "main\\nalpha\\nbeta\\n" > city.txt',
+        'else',
+        '  printf "main\\nalpha\\nbeta\\ngamma\\n" > city.txt',
+        'fi',
+        'printf "resolved merge run %s\\n" "$count" > "$result_path"',
+        '',
+      ].join('\n'),
+    );
+    await chmod(fakeCodexPath, 0o755);
+
+    process.env.PATH = `${fakeBinPath}:${originalPath || ''}`;
+
+    const result = await runAgent(
+      {
+        agent: 'codex',
+        serverUrl: 'http://tracker.example.test',
+      },
+      {
+        id: 128,
+        projectId: 1,
+        issueId: 200,
+        jobKind: 'review',
+        commandId: 'test-epic-review',
+        branchName: 'tracker/cott-200/epic-1',
+        promptText: [
+          'Child issues to verify:',
+          '- COTT-201: tracker/cott-201/alpha',
+          '- COTT-202: tracker/cott-202/beta',
+          '- COTT-203: tracker/cott-203/gamma',
+        ].join('\n'),
+        input: { codexCloudBaseBranch: 'main', issueKey: 'COTT-200' },
+      },
+      sourcePath,
+    );
+
+    assert.match(result.resultText, /Agent run #1:/);
+    assert.match(result.resultText, /Agent run #2:/);
+    assert.match(result.resultText, /Runner pushed branch tracker\/cott-200\/epic-1/);
+    assert.equal(await readFile(counterPath, 'utf8'), '2');
+
+    await git(['clone', originPath, verifyPath], root);
+    await git(['switch', 'tracker/cott-200/epic-1'], verifyPath);
+    assert.equal(await readFile(join(verifyPath, 'city.txt'), 'utf8'), 'main\nalpha\nbeta\ngamma\n');
+    await git(['fetch', 'origin'], verifyPath);
+    await git(['merge-base', '--is-ancestor', 'origin/tracker/cott-201/alpha', 'HEAD'], verifyPath);
+    await git(['merge-base', '--is-ancestor', 'origin/tracker/cott-202/beta', 'HEAD'], verifyPath);
+    await git(['merge-base', '--is-ancestor', 'origin/tracker/cott-203/gamma', 'HEAD'], verifyPath);
   } finally {
     process.env.PATH = originalPath;
     await rm(root, { recursive: true, force: true });

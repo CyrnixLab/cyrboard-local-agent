@@ -44,6 +44,9 @@ CLI exits, the runner stages, validates, commits, and pushes the configured job
 branch. For epic review jobs, the runner also creates the missing epic branch
 when needed and pre-merges child branches listed in the job prompt.
 
+For Codex, the default sandbox remains `workspace-write`. The runner also passes
+Codex workspace network access so the CLI can call Tracker MCP during the job.
+
 ## Run
 
 ```bash
