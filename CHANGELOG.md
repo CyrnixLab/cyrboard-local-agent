@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.9 - 2026-06-05
+
+- Make Claude Code local automation non-interactive by default with `bypassPermissions`.
+- Add `connect --permission-mode` and show the saved permission mode in `status`.
+- Keep job-scoped model overrides tied to the matching local agent so Claude runners do not receive Codex model values.
+
 ## 0.1.8 - 2026-06-04
 
 - Enable Codex `workspace-write` network access so local jobs can call Tracker MCP without switching to a broader sandbox.

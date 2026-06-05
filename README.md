@@ -73,6 +73,10 @@ npx @cyrnixlab/cyrboard-local-agent status
 `--model` and `--reasoning` are optional local defaults. Tracker job input can
 override them per AI executor/job.
 
+For Claude Code, the default permission mode is `bypassPermissions` so
+non-interactive jobs can run shell checks. Override it with
+`--permission-mode <mode>` if a repository needs stricter local behavior.
+
 Supported reasoning values:
 
 - `low`
