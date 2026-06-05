@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { buildCodexArgs, finalizeExecutionRepo, prepareExecutionRepo, prepareJobGitState, runAgent } from '../src/agents.js';
+import { buildClaudeArgs, buildCodexArgs, finalizeExecutionRepo, prepareExecutionRepo, prepareJobGitState, runAgent } from '../src/agents.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -44,6 +44,56 @@ test('buildCodexArgs does not force network config for non workspace-write sandb
   );
 
   assert.equal(args.includes('sandbox_workspace_write.network_access=true'), false);
+});
+
+test('buildClaudeArgs uses local model when job agent does not match runner agent', () => {
+  const args = buildClaudeArgs(
+    {
+      agent: 'claude',
+      model: 'claude-sonnet-4-5',
+      reasoning: 'xhigh',
+    },
+    {
+      input: {
+        aiAgentCode: 'codex',
+        modelCode: 'gpt-5.5',
+        reasoningEffort: 'xhigh',
+      },
+    },
+    '/repo',
+  );
+
+  assert.equal(args.includes('gpt-5.5'), false);
+  assert.deepEqual(args.slice(0, 7), [
+    '--print',
+    '--output-format',
+    'text',
+    '--permission-mode',
+    'bypassPermissions',
+    '--add-dir',
+    '/repo',
+  ]);
+  assert.deepEqual(args.slice(-4), ['--model', 'claude-sonnet-4-5', '--effort', 'xhigh']);
+});
+
+test('buildClaudeArgs keeps matching job model override', () => {
+  const args = buildClaudeArgs(
+    {
+      agent: 'claude',
+      model: 'claude-sonnet-4-5',
+      reasoning: 'high',
+    },
+    {
+      input: {
+        aiAgentCode: 'claude',
+        modelCode: 'claude-opus-4-1',
+        reasoningEffort: 'xhigh',
+      },
+    },
+    '/repo',
+  );
+
+  assert.deepEqual(args.slice(-4), ['--model', 'claude-opus-4-1', '--effort', 'xhigh']);
 });
 
 test('prepareExecutionRepo checks out the requested remote branch in an isolated clone', async () => {

@@ -50,6 +50,7 @@ async function connect(args) {
   const agent = optionalString(args, 'agent', 'codex');
   const label = optionalString(args, 'label', `${process.platform} local agent`);
   const sandbox = optionalString(args, 'sandbox', 'workspace-write');
+  const permissionMode = optionalString(args, 'permission-mode', '');
   const model = optionalString(args, 'model', '');
   const reasoning = optionalString(args, 'reasoning', '');
   const shouldStart = args.start === true;
@@ -79,6 +80,7 @@ async function connect(args) {
     label,
     agent,
     sandbox,
+    permissionMode,
     model,
     reasoning,
   });
@@ -124,6 +126,9 @@ async function status(args) {
   if (config.reasoning) {
     console.log(`Reasoning: ${config.reasoning}`);
   }
+  if (config.permissionMode) {
+    console.log(`Permission mode: ${config.permissionMode}`);
+  }
   console.log(`Config: ${repoPath}/.cyrboard/local-agent.json`);
   console.log('Status only reads local config; it does not start polling.');
   console.log('To process jobs, run: cyrnixlab-local-agent start --repo . --interval 10');
@@ -140,7 +145,7 @@ function printHelp() {
   console.log(`Cyrnix Lab Local Agent
 
 Usage:
-  cyrnixlab-local-agent connect --server <url> --project-id <id> --token <setup-token> [--repo .] [--agent codex|claude] [--model <model>] [--reasoning <effort>] [--start] [--interval 10]
+  cyrnixlab-local-agent connect --server <url> --project-id <id> --token <setup-token> [--repo .] [--agent codex|claude] [--model <model>] [--reasoning <effort>] [--permission-mode <mode>] [--start] [--interval 10]
   cyrnixlab-local-agent run-once [--repo .]
   cyrnixlab-local-agent start [--repo .] [--interval 10]
   cyrnixlab-local-agent status [--repo .]
@@ -152,6 +157,9 @@ Agent modes:
 
 Reasoning efforts:
   low, medium, high, xhigh
+
+Claude permission mode:
+  Defaults to bypassPermissions for non-interactive local automation. Override with --permission-mode when needed.
 `);
 }
 

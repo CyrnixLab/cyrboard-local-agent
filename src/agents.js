@@ -525,12 +525,28 @@ function shouldEnableCodexWorkspaceNetwork(config, sandbox) {
 
 async function runClaudeAgent(config, job, repoPath, promptPath, resultPath) {
   const command = 'claude';
+  const args = buildClaudeArgs(config, job, repoPath);
+  const env = buildJobEnv(config, job, promptPath, resultPath);
+  const prompt = await import('node:fs/promises').then((fs) => fs.readFile(promptPath, 'utf8'));
+  const result = await runWithInput(command, args, prompt, { cwd: repoPath, env });
+
+  await import('node:fs/promises').then((fs) => fs.writeFile(resultPath, result.stdout || '', { mode: 0o600 }));
+  const resultText = redactSecrets(await readResultText(resultPath, result.stdout || result.stderr || ''));
+
+  return {
+    summary: redactSecrets(trimSummary(result.stdout || result.stderr || `Claude completed job #${job.id}.`)),
+    resultText,
+    resultPath,
+  };
+}
+
+export function buildClaudeArgs(config, job, repoPath) {
   const args = [
     '--print',
     '--output-format',
     'text',
     '--permission-mode',
-    config.permissionMode || 'acceptEdits',
+    config.permissionMode || 'bypassPermissions',
     '--add-dir',
     repoPath,
   ];
@@ -546,18 +562,7 @@ async function runClaudeAgent(config, job, repoPath, promptPath, resultPath) {
     args.push('--effort', reasoning);
   }
 
-  const env = buildJobEnv(config, job, promptPath, resultPath);
-  const prompt = await import('node:fs/promises').then((fs) => fs.readFile(promptPath, 'utf8'));
-  const result = await runWithInput(command, args, prompt, { cwd: repoPath, env });
-
-  await import('node:fs/promises').then((fs) => fs.writeFile(resultPath, result.stdout || '', { mode: 0o600 }));
-  const resultText = redactSecrets(await readResultText(resultPath, result.stdout || result.stderr || ''));
-
-  return {
-    summary: redactSecrets(trimSummary(result.stdout || result.stderr || `Claude completed job #${job.id}.`)),
-    resultText,
-    resultPath,
-  };
+  return args;
 }
 
 async function readResultText(resultPath, fallback) {
@@ -623,9 +628,18 @@ async function gitOutput(repoPath, args) {
 function resolveModel(config, job) {
   const fromJob = job.input?.modelCode;
   const fromConfig = config.model;
-  const value = typeof fromJob === 'string' && fromJob.trim() !== '' ? fromJob : fromConfig;
+  const value = shouldUseJobScopedModel(config, job) && typeof fromJob === 'string' && fromJob.trim() !== ''
+    ? fromJob
+    : fromConfig;
 
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : null;
+}
+
+function shouldUseJobScopedModel(config, job) {
+  const configuredAgent = typeof config.agent === 'string' ? config.agent.trim() : '';
+  const jobAgent = typeof job.input?.aiAgentCode === 'string' ? job.input.aiAgentCode.trim() : '';
+
+  return configuredAgent === '' || jobAgent === '' || configuredAgent === jobAgent;
 }
 
 function resolveReasoning(config, job) {
