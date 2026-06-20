@@ -5,11 +5,12 @@ import { redactSecrets } from './redact.js';
 const DEFAULT_MAX_MERGE_CONFLICT_AGENT_RUNS = 5;
 
 class MergeConflictNeedsAgentError extends Error {
-  constructor(childBranch, message, partialResult) {
+  constructor(childBranch, message, partialResult, diagnostics = '') {
     super(message);
     this.name = 'MergeConflictNeedsAgentError';
     this.childBranch = childBranch;
     this.partialResult = partialResult;
+    this.diagnostics = diagnostics;
   }
 }
 
@@ -272,10 +273,15 @@ async function mergeUnmergedChildBranches(job, repoPath, branchName, partialResu
       partialResult.committed = true;
       partialResult.commitSha = await gitOutput(repoPath, ['rev-parse', 'HEAD']);
     } catch (error) {
+      const diagnostics = await buildMergeConflictDiagnostics(repoPath);
       throw new MergeConflictNeedsAgentError(
         childBranch,
-        `Merge conflict remains unresolved for child branch ${childBranch}. ${error.message}`,
+        [
+          `Merge conflict remains unresolved for child branch ${childBranch}. ${error.message}`,
+          diagnostics,
+        ].filter(Boolean).join('\n\n'),
         { ...partialResult, mergedBranches: [...partialResult.mergedBranches] },
+        diagnostics,
       );
     }
   }
@@ -307,6 +313,22 @@ async function assertNoUnmergedFiles(repoPath) {
   if (unmergedFiles !== '') {
     throw new Error(`Merge conflict remains unresolved in files:\n${unmergedFiles}`);
   }
+}
+
+async function buildMergeConflictDiagnostics(repoPath) {
+  const status = await gitOutputOrNull(repoPath, ['status', '--porcelain']);
+  const unmergedFiles = await gitOutputOrNull(repoPath, ['diff', '--name-only', '--diff-filter=U']);
+  const stagedFiles = await gitOutputOrNull(repoPath, ['diff', '--cached', '--name-only']);
+  const parts = ['Runner git diagnostics:'];
+
+  parts.push('git status --porcelain:');
+  parts.push(status && status.trim() !== '' ? status : '(clean)');
+  parts.push('git diff --name-only --diff-filter=U:');
+  parts.push(unmergedFiles && unmergedFiles.trim() !== '' ? unmergedFiles : '(none)');
+  parts.push('git diff --cached --name-only:');
+  parts.push(stagedFiles && stagedFiles.trim() !== '' ? stagedFiles : '(none)');
+
+  return parts.join('\n');
 }
 
 async function listChangedWorkingTreeFiles(repoPath) {
@@ -341,10 +363,20 @@ function buildMergeConflictContinuationPrompt(job, error, attempt) {
     '- The runner has already checked out the job branch.',
     '- Some child branches may already be merged and committed.',
     '- Conflict markers may be present in the current files.',
+    '- Current diagnostics from the failed merge:',
+    '',
+    '```text',
+    error.diagnostics || 'No git diagnostics captured.',
+    '```',
     '',
     'Resolve the current conflict in the working tree.',
     'Preserve the behavior from all completed child branches listed in the original job prompt.',
-    'Run the relevant checks before final answer.',
+    'Before final answer, make sure the worktree is ready for runner finalization:',
+    '- no conflict markers remain in files;',
+    '- `git status --porcelain` has no unresolved entries such as UU, AA, DD, AU, UD, DU, or UA;',
+    '- after the runner stages changes, `git diff --name-only --diff-filter=U` must be empty.',
+    'Run the relevant checks only after the merge state is resolved.',
+    'Do not report checks as passed if unresolved merge files remain.',
     'Do not run `git add`, `git commit`, or `git push`; the runner will stage, commit, continue merging remaining child branches, and push after the CLI exits.',
     '',
     'If the conflict is not safely resolvable, the first line of your final answer must be exactly:',
@@ -403,7 +435,7 @@ export async function prepareExecutionRepo(config, job, repoPath) {
     return worktreePath;
   }
 
-  const baseBranch = resolveBaseBranch(config, job);
+  const baseBranch = await resolveBaseBranch(config, job, repoPath);
   await runCommand('git', ['fetch', 'origin', baseBranch], { cwd: worktreePath, silent: true });
   await runCommand('git', ['switch', '-c', branchName, `origin/${baseBranch}`], { cwd: worktreePath, silent: true });
 
@@ -422,6 +454,7 @@ function buildPrompt(job) {
       'Edit files and run checks. Do not rely on git commit or git push from inside the CLI sandbox.',
       'After the CLI exits, the runner stages, validates, commits, and pushes the branch.',
       'For epic merge/review jobs, the runner may pre-merge child branches from this prompt. If conflict markers are present, resolve the file contents and leave the worktree ready to commit.',
+      'Before final answer, make sure `git status --porcelain` has no unresolved entries such as UU, AA, DD, AU, UD, DU, or UA. Do not report checks as passed while unresolved merge files remain.',
       '',
     );
   }
@@ -580,12 +613,67 @@ async function readResultText(resultPath, fallback) {
   return String(fallback || '').trim();
 }
 
-function resolveBaseBranch(config, job) {
+async function resolveBaseBranch(config, job, repoPath) {
   const fromJob = job.input?.codexCloudBaseBranch;
   const fromConfig = config.baseBranch;
-  const value = typeof fromJob === 'string' && fromJob.trim() !== '' ? fromJob : fromConfig;
+  const value = normalizeBaseBranchName(
+    typeof fromJob === 'string' && fromJob.trim() !== '' ? fromJob : fromConfig,
+  );
 
-  return typeof value === 'string' && value.trim() !== '' ? value.trim() : 'main';
+  if (value !== '') {
+    return value;
+  }
+
+  const candidates = [];
+  const originHead = await gitOutputOrNull(repoPath, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
+  const upstreamBranch = await gitOutputOrNull(repoPath, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+  const currentBranch = await gitOutputOrNull(repoPath, ['branch', '--show-current']);
+
+  addBaseBranchCandidate(candidates, originHead);
+  addBaseBranchCandidate(candidates, upstreamBranch);
+  addBaseBranchCandidate(candidates, currentBranch);
+
+  for (const fallbackBranch of ['master', 'main', 'develop', 'dev', 'trunk']) {
+    addBaseBranchCandidate(candidates, fallbackBranch);
+  }
+
+  for (const branchName of candidates) {
+    if (await remoteBranchExists(repoPath, branchName)) {
+      return branchName;
+    }
+  }
+
+  throw new Error([
+    'Cannot resolve base branch for this local runner job.',
+    'Set the project base branch in AI executor settings, configure origin/HEAD,',
+    'checkout a local branch that tracks origin, or create a default branch in the remote repository.',
+  ].join(' '));
+}
+
+function addBaseBranchCandidate(candidates, value) {
+  const branchName = normalizeBaseBranchName(value);
+
+  if (branchName !== '' && !candidates.includes(branchName)) {
+    candidates.push(branchName);
+  }
+}
+
+function normalizeBaseBranchName(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  const normalized = value.trim()
+    .replace(/^refs\/remotes\/origin\//, '')
+    .replace(/^refs\/heads\//, '')
+    .replace(/^origin\//, '');
+
+  return normalized === 'HEAD' ? '' : normalized;
+}
+
+async function remoteBranchExists(repoPath, branchName) {
+  return branchName !== ''
+    && await gitSucceeds(repoPath, ['ls-remote', '--exit-code', '--heads', 'origin', branchName]);
 }
 
 async function copyGitIdentity(sourceRepoPath, targetRepoPath) {
@@ -645,7 +733,9 @@ function shouldUseJobScopedModel(config, job) {
 function resolveReasoning(config, job) {
   const fromJob = job.input?.reasoningEffort;
   const fromConfig = config.reasoning;
-  const value = typeof fromJob === 'string' && fromJob.trim() !== '' ? fromJob : fromConfig;
+  const value = shouldUseJobScopedModel(config, job) && typeof fromJob === 'string' && fromJob.trim() !== ''
+    ? fromJob
+    : fromConfig;
 
   if (typeof value !== 'string') {
     return null;

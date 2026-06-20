@@ -35,6 +35,28 @@ test('buildCodexArgs enables workspace-write network access for Tracker MCP', ()
   assert.deepEqual(args.slice(-5), ['--model', 'gpt-5.5', '-c', 'model_reasoning_effort="xhigh"', '-']);
 });
 
+test('buildCodexArgs uses job-scoped model and reasoning from Tracker claim payload', () => {
+  const args = buildCodexArgs(
+    {
+      agent: 'codex',
+      sandbox: 'workspace-write',
+      model: 'gpt-5-mini',
+      reasoning: 'low',
+    },
+    {
+      input: {
+        aiAgentCode: 'codex',
+        modelCode: 'gpt-5.5',
+        reasoningEffort: 'medium',
+      },
+    },
+    '/repo',
+    '/repo/.cyrboard/jobs/1-result.md',
+  );
+
+  assert.deepEqual(args.slice(-5), ['--model', 'gpt-5.5', '-c', 'model_reasoning_effort="medium"', '-']);
+});
+
 test('buildCodexArgs does not force network config for non workspace-write sandbox', () => {
   const args = buildCodexArgs(
     { sandbox: 'danger-full-access' },
@@ -57,7 +79,7 @@ test('buildClaudeArgs uses local model when job agent does not match runner agen
       input: {
         aiAgentCode: 'codex',
         modelCode: 'gpt-5.5',
-        reasoningEffort: 'xhigh',
+        reasoningEffort: 'medium',
       },
     },
     '/repo',
@@ -132,6 +154,59 @@ test('prepareExecutionRepo checks out the requested remote branch in an isolated
     assert.equal(await readFile(join(preparedPath, 'city.txt'), 'utf8'), 'branch\n');
     assert.equal((await gitOutput(['branch', '--show-current'], preparedPath)).trim(), 'tracker/test-branch');
     assert.equal(await readFile(join(sourcePath, 'city.txt'), 'utf8'), 'main\n');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('prepareExecutionRepo infers a non-main default branch from the local repository', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cyrboard-agent-'));
+  const originPath = join(root, 'origin.git');
+  const sourcePath = join(root, 'source');
+
+  try {
+    await createRepositoryWithBaseBranch(originPath, sourcePath, 'master');
+
+    const preparedPath = await prepareExecutionRepo(
+      {},
+      {
+        id: 130,
+        branchName: 'tracker/po-1/plan-test',
+        input: {},
+      },
+      sourcePath,
+    );
+
+    assert.notEqual(preparedPath, sourcePath);
+    assert.equal(await readFile(join(preparedPath, 'city.txt'), 'utf8'), 'master\n');
+    assert.equal((await gitOutput(['branch', '--show-current'], preparedPath)).trim(), 'tracker/po-1/plan-test');
+    assert.equal(await gitOutput(['rev-parse', '--verify', 'origin/master'], preparedPath), await gitOutput(['rev-parse', 'HEAD'], preparedPath));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('prepareExecutionRepo reports a clear error when no base branch can be inferred', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cyrboard-agent-'));
+  const originPath = join(root, 'origin.git');
+  const sourcePath = join(root, 'source');
+
+  try {
+    await git(['init', '--bare', originPath], root);
+    await git(['clone', originPath, sourcePath], root);
+
+    await assert.rejects(
+      () => prepareExecutionRepo(
+        {},
+        {
+          id: 131,
+          branchName: 'tracker/po-1/plan-empty',
+          input: {},
+        },
+        sourcePath,
+      ),
+      /Cannot resolve base branch for this local runner job/,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -238,6 +313,56 @@ test('finalizeExecutionRepo rejects unresolved conflict markers', async () => {
     await assert.rejects(
       () => finalizeExecutionRepo({}, job, preparedPath),
       /Merge conflict markers remain/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('finalizeExecutionRepo reports git diagnostics when child branch merge remains unresolved', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cyrboard-agent-'));
+  const originPath = join(root, 'origin.git');
+  const sourcePath = join(root, 'source');
+
+  try {
+    await createMainRepository(originPath, sourcePath);
+
+    await git(['switch', '-c', 'tracker/cott-120/epic-1'], sourcePath);
+    await writeFile(join(sourcePath, 'city.txt'), 'main\nepic\n');
+    await git(['commit', '-am', 'Epic change'], sourcePath);
+    await git(['push', '-u', 'origin', 'tracker/cott-120/epic-1'], sourcePath);
+
+    await git(['switch', 'main'], sourcePath);
+    await git(['switch', '-c', 'tracker/cott-121/dev-child'], sourcePath);
+    await writeFile(join(sourcePath, 'city.txt'), 'main\nchild\n');
+    await git(['commit', '-am', 'Child change'], sourcePath);
+    await git(['push', '-u', 'origin', 'tracker/cott-121/dev-child'], sourcePath);
+    await git(['switch', 'main'], sourcePath);
+
+    const job = {
+      id: 129,
+      jobKind: 'merge_repair',
+      branchName: 'tracker/cott-120/epic-1',
+      promptText: [
+        'Child branches to finish merging:',
+        '- COTT-121: tracker/cott-121/dev-child',
+      ].join('\n'),
+      input: { codexCloudBaseBranch: 'main', issueKey: 'COTT-120' },
+    };
+    const preparedPath = await prepareExecutionRepo({}, job, sourcePath);
+
+    await assert.rejects(
+      () => finalizeExecutionRepo({}, job, preparedPath),
+      (error) => {
+        assert.match(error.message, /Merge conflict remains unresolved for child branch tracker\/cott-121\/dev-child/);
+        assert.match(error.message, /Runner git diagnostics:/);
+        assert.match(error.message, /git status --porcelain:/);
+        assert.match(error.message, /UU city\.txt/);
+        assert.match(error.message, /git diff --name-only --diff-filter=U:/);
+        assert.match(error.message, /city\.txt/);
+
+        return true;
+      },
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -425,16 +550,20 @@ async function gitOutput(args, cwd) {
 }
 
 async function createMainRepository(originPath, sourcePath) {
+  await createRepositoryWithBaseBranch(originPath, sourcePath, 'main');
+}
+
+async function createRepositoryWithBaseBranch(originPath, sourcePath, baseBranch) {
   const rootPath = dirname(originPath);
 
   await git(['init', '--bare', originPath], rootPath);
   await git(['clone', originPath, sourcePath], rootPath);
   await git(['config', 'user.name', 'Cyrboard Test'], sourcePath);
   await git(['config', 'user.email', 'test@example.com'], sourcePath);
-  await git(['switch', '-c', 'main'], sourcePath);
-  await writeFile(join(sourcePath, 'city.txt'), 'main\n');
+  await git(['switch', '-c', baseBranch], sourcePath);
+  await writeFile(join(sourcePath, 'city.txt'), `${baseBranch}\n`);
   await writeFile(join(sourcePath, '.gitignore'), '.cyrboard/\n');
   await git(['add', 'city.txt', '.gitignore'], sourcePath);
-  await git(['commit', '-m', 'Initial main'], sourcePath);
-  await git(['push', '-u', 'origin', 'main'], sourcePath);
+  await git(['commit', '-m', `Initial ${baseBranch}`], sourcePath);
+  await git(['push', '-u', 'origin', baseBranch], sourcePath);
 }

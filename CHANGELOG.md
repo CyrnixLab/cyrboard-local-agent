@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.11 - 2026-06-21
+
+- Resolve local runner base branches from project/job config, `origin/HEAD`, upstream, or existing remote branches instead of falling back to hardcoded `main`.
+- Report a clear setup error when the remote repository has no branch that can be used as the job base branch.
+
+## 0.1.10 - 2026-06-08
+
+- Strengthen epic merge-repair continuation prompts with an explicit clean merge-state contract.
+- Include `git status --porcelain`, unmerged files, and staged files in unresolved merge diagnostics.
+- Cover Tracker-provided Codex model/reasoning overrides in tests.
+
 ## 0.1.9 - 2026-06-05
 
 - Make Claude Code local automation non-interactive by default with `bypassPermissions`.
