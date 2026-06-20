@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.12 - 2026-06-21
+
+- Retry transient Tracker API failures in the local runner client: network errors, `408`, `429`, and `5xx` gateway/backend responses.
+- Use a longer retry budget for terminal job reports (`complete`/`fail`) so deploy-time `502 Bad Gateway` responses do not lose the final job status.
+- Keep permanent authorization/setup errors fail-fast.
+
 ## 0.1.11 - 2026-06-21
 
 - Resolve local runner base branches from project/job config, `origin/HEAD`, upstream, or existing remote branches instead of falling back to hardcoded `main`.

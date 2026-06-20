@@ -51,3 +51,127 @@ test('TrackerClient parses successful JSON responses', async () => {
     globalThis.fetch = previousFetch;
   }
 });
+
+test('TrackerClient retries transient gateway responses', async () => {
+  const previousFetch = globalThis.fetch;
+  let calls = 0;
+  const delays = [];
+
+  globalThis.fetch = async () => {
+    calls += 1;
+
+    if (calls === 1) {
+      return new Response('<html><body>Bad Gateway</body></html>', {
+        status: 502,
+        statusText: 'Bad Gateway',
+        headers: {
+          'content-type': 'text/html; charset=utf-8',
+        },
+      });
+    }
+
+    return Response.json({ job: null });
+  };
+
+  try {
+    const client = new TrackerClient('https://cyrboard.cyrnix.dev', {
+      delay: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+      retryOptions: {
+        attempts: 2,
+        initialDelayMs: 25,
+        maxDelayMs: 25,
+      },
+    });
+    const response = await client.claim('cyr_runner_1234567890abcdef');
+
+    assert.deepEqual(response, { job: null });
+    assert.equal(calls, 2);
+    assert.deepEqual(delays, [25]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('TrackerClient uses extended retries for terminal callbacks', async () => {
+  const previousFetch = globalThis.fetch;
+  let calls = 0;
+  const delays = [];
+
+  globalThis.fetch = async () => {
+    calls += 1;
+
+    if (calls < 4) {
+      return Response.json({ error: 'temporary maintenance' }, {
+        status: 503,
+        statusText: 'Service Unavailable',
+      });
+    }
+
+    return Response.json({ ok: true });
+  };
+
+  try {
+    const client = new TrackerClient('https://cyrboard.cyrnix.dev', {
+      delay: async (milliseconds) => {
+        delays.push(milliseconds);
+      },
+      retryOptions: {
+        attempts: 1,
+        initialDelayMs: 10,
+        maxDelayMs: 10,
+      },
+      terminalRetryOptions: {
+        attempts: 4,
+        initialDelayMs: 10,
+        maxDelayMs: 40,
+      },
+    });
+    const response = await client.complete('cyr_runner_1234567890abcdef', {
+      jobId: 143,
+      resultSummary: 'done',
+      resultText: 'done',
+    });
+
+    assert.deepEqual(response, { ok: true });
+    assert.equal(calls, 4);
+    assert.deepEqual(delays, [10, 20, 40]);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('TrackerClient does not retry permanent authorization failures', async () => {
+  const previousFetch = globalThis.fetch;
+  let calls = 0;
+
+  globalThis.fetch = async () => {
+    calls += 1;
+
+    return Response.json({ error: 'Forbidden' }, {
+      status: 403,
+      statusText: 'Forbidden',
+    });
+  };
+
+  try {
+    const client = new TrackerClient('https://cyrboard.cyrnix.dev', {
+      retryOptions: {
+        attempts: 3,
+        initialDelayMs: 1,
+        maxDelayMs: 1,
+      },
+    });
+
+    await assert.rejects(
+      () => client.heartbeat('cyr_runner_1234567890abcdef', {
+        jobId: 143,
+      }),
+      /Tracker request failed: 403 Forbidden/,
+    );
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
