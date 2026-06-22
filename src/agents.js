@@ -67,16 +67,42 @@ export async function prepareJobGitState(config, job, repoPath) {
   const branchName = normalizeBranchName(job.branchName);
 
   if (branchName === '' || config.branchIsolation === false) {
-    return { mergedBranches: [], conflicts: [], remoteBranchCreated: false };
+    return { mergedBranches: [], conflicts: [], remoteBranchCreated: false, requiredAncestorBranchesMerged: [], requiredAncestorBranchConflicts: [] };
   }
 
   const remoteBranchCreated = await ensureRemoteBranch(repoPath, branchName);
   const childBranches = parseChildBranches(job.promptText || '').filter((childBranch) => childBranch !== branchName);
+  const shouldMergeRequiredAncestorBranches = job.jobKind !== 'merge_to_epic';
+  const requiredAncestorBranches = shouldMergeRequiredAncestorBranches
+    ? resolveRequiredAncestorBranches(job).filter((ancestorBranch) => ancestorBranch !== branchName)
+    : [];
   const mergedBranches = [];
   const conflicts = [];
+  const requiredAncestorBranchesMerged = [];
+  const requiredAncestorBranchConflicts = [];
+
+  for (const ancestorBranch of requiredAncestorBranches) {
+    await fetchRemoteBranch(repoPath, ancestorBranch);
+
+    if (await gitSucceeds(repoPath, ['merge-base', '--is-ancestor', `origin/${ancestorBranch}`, 'HEAD'])) {
+      continue;
+    }
+
+    try {
+      await runCommand('git', ['merge', '--no-edit', `origin/${ancestorBranch}`], { cwd: repoPath, silent: true });
+      requiredAncestorBranchesMerged.push(ancestorBranch);
+    } catch (error) {
+      requiredAncestorBranchConflicts.push(ancestorBranch);
+      break;
+    }
+  }
+
+  if (requiredAncestorBranchConflicts.length > 0) {
+    return { mergedBranches, conflicts, remoteBranchCreated, requiredAncestorBranchesMerged, requiredAncestorBranchConflicts };
+  }
 
   for (const childBranch of childBranches) {
-    await runCommand('git', ['fetch', 'origin', `${childBranch}:refs/remotes/origin/${childBranch}`], { cwd: repoPath, silent: true });
+    await fetchRemoteBranch(repoPath, childBranch);
 
     try {
       await runCommand('git', ['merge', '--no-edit', `origin/${childBranch}`], { cwd: repoPath, silent: true });
@@ -87,7 +113,7 @@ export async function prepareJobGitState(config, job, repoPath) {
     }
   }
 
-  return { mergedBranches, conflicts, remoteBranchCreated };
+  return { mergedBranches, conflicts, remoteBranchCreated, requiredAncestorBranchesMerged, requiredAncestorBranchConflicts };
 }
 
 export async function finalizeExecutionRepo(config, job, repoPath) {
@@ -154,8 +180,16 @@ function appendGitResult(result, prepareResult, finalizeResult) {
     lines.push(`Child branches merged: ${[...new Set(mergedBranches)].join(', ')}`);
   }
 
+  if ((prepareResult.requiredAncestorBranchesMerged || []).length > 0) {
+    lines.push(`Required predecessor branches merged before agent run: ${[...new Set(prepareResult.requiredAncestorBranchesMerged)].join(', ')}`);
+  }
+
   if ((prepareResult.conflicts || []).length > 0) {
     lines.push(`Merge conflicts prepared for agent resolution: ${prepareResult.conflicts.join(', ')}`);
+  }
+
+  if ((prepareResult.requiredAncestorBranchConflicts || []).length > 0) {
+    lines.push(`Required predecessor merge conflicts prepared for agent resolution: ${prepareResult.requiredAncestorBranchConflicts.join(', ')}`);
   }
 
   if (finalizeResult.committed) {
@@ -241,6 +275,29 @@ async function ensureRemoteBranch(repoPath, branchName) {
   return true;
 }
 
+async function fetchRemoteBranch(repoPath, branchName) {
+  await runCommand('git', ['fetch', 'origin', `${branchName}:refs/remotes/origin/${branchName}`], { cwd: repoPath, silent: true });
+}
+
+export function resolveRequiredAncestorBranches(job) {
+  const branches = new Set();
+  const value = job?.input?.requiredAncestorBranches;
+
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  for (const branchNameValue of value) {
+    const branchName = normalizeBranchName(branchNameValue);
+
+    if (branchName !== '') {
+      branches.add(branchName);
+    }
+  }
+
+  return [...branches];
+}
+
 function parseChildBranches(promptText) {
   const branches = new Set();
 
@@ -255,12 +312,35 @@ function parseChildBranches(promptText) {
   return [...branches];
 }
 
+async function assertRemoteBranchContainsRequiredAncestors(job, repoPath, targetBranch) {
+  const requiredAncestorBranches = resolveRequiredAncestorBranches(job).filter((ancestorBranch) => ancestorBranch !== targetBranch);
+  const missingBranches = [];
+
+  for (const ancestorBranch of requiredAncestorBranches) {
+    await fetchRemoteBranch(repoPath, ancestorBranch);
+
+    if (await gitSucceeds(repoPath, ['merge-base', '--is-ancestor', `origin/${ancestorBranch}`, `origin/${targetBranch}`])) {
+      continue;
+    }
+
+    missingBranches.push(ancestorBranch);
+  }
+
+  if (missingBranches.length > 0) {
+    throw new Error([
+      `Child branch ${targetBranch} is missing required predecessor branches: ${missingBranches.join(', ')}.`,
+      'Retry the child task so the runner can merge predecessor branches into the task branch before implementation, then run merge-to-epic again.',
+    ].join(' '));
+  }
+}
+
 async function mergeUnmergedChildBranches(job, repoPath, branchName, partialResult) {
   const childBranches = parseChildBranches(job.promptText || '').filter((childBranch) => childBranch !== branchName);
   const mergedBranches = [];
 
   for (const childBranch of childBranches) {
-    await runCommand('git', ['fetch', 'origin', `${childBranch}:refs/remotes/origin/${childBranch}`], { cwd: repoPath, silent: true });
+    await fetchRemoteBranch(repoPath, childBranch);
+    await assertRemoteBranchContainsRequiredAncestors(job, repoPath, childBranch);
 
     if (await gitSucceeds(repoPath, ['merge-base', '--is-ancestor', `origin/${childBranch}`, 'HEAD'])) {
       continue;

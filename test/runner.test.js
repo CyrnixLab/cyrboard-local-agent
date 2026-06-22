@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { resolveRequiredAncestorBranches } from '../src/agents.js';
 import { runOnce, startLoop } from '../src/runner.js';
 
 test('startLoop keeps polling after an iteration failure', async () => {
@@ -201,4 +202,24 @@ test('runOnce redacts secrets before reporting failure', async () => {
       errorMessage: 'failed with [redacted-token]',
     },
   ]);
+});
+
+test('resolveRequiredAncestorBranches normalizes tracker job input', () => {
+  assert.deepEqual(
+    resolveRequiredAncestorBranches({
+      input: {
+        requiredAncestorBranches: [
+          ' tracker/po-3/dev-1 ',
+          '',
+          'tracker/po-3/dev-1',
+          'tracker/po-4/dev-2',
+          42,
+          null,
+        ],
+      },
+    }),
+    ['tracker/po-3/dev-1', 'tracker/po-4/dev-2'],
+  );
+
+  assert.deepEqual(resolveRequiredAncestorBranches({ input: {} }), []);
 });

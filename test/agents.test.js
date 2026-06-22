@@ -254,6 +254,94 @@ test('prepareJobGitState creates the remote epic branch and merges child branche
   }
 });
 
+test('prepareJobGitState merges required predecessor branches before agent run', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cyrboard-agent-'));
+  const originPath = join(root, 'origin.git');
+  const sourcePath = join(root, 'source');
+
+  try {
+    await createMainRepository(originPath, sourcePath);
+
+    await git(['switch', '-c', 'tracker/po-3/dev-predecessor'], sourcePath);
+    await writeFile(join(sourcePath, 'billing.txt'), 'predecessor ready\n');
+    await git(['add', 'billing.txt'], sourcePath);
+    await git(['commit', '-m', 'Predecessor task change'], sourcePath);
+    await git(['push', '-u', 'origin', 'tracker/po-3/dev-predecessor'], sourcePath);
+    await git(['switch', 'main'], sourcePath);
+
+    const job = {
+      id: 132,
+      jobKind: 'dev',
+      branchName: 'tracker/po-4/dev-dependent',
+      promptText: '',
+      input: {
+        codexCloudBaseBranch: 'main',
+        issueKey: 'PO-4',
+        requiredAncestorBranches: ['tracker/po-3/dev-predecessor'],
+      },
+    };
+    const preparedPath = await prepareExecutionRepo({}, job, sourcePath);
+    const result = await prepareJobGitState({}, job, preparedPath);
+
+    assert.deepEqual(result.requiredAncestorBranchesMerged, ['tracker/po-3/dev-predecessor']);
+    assert.deepEqual(result.requiredAncestorBranchConflicts, []);
+    assert.equal(await readFile(join(preparedPath, 'billing.txt'), 'utf8'), 'predecessor ready\n');
+    await git(['merge-base', '--is-ancestor', 'origin/tracker/po-3/dev-predecessor', 'HEAD'], preparedPath);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('finalizeExecutionRepo rejects epic merge when child misses required predecessor branch', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cyrboard-agent-'));
+  const originPath = join(root, 'origin.git');
+  const sourcePath = join(root, 'source');
+
+  try {
+    await createMainRepository(originPath, sourcePath);
+
+    await git(['switch', '-c', 'tracker/po-3/dev-predecessor'], sourcePath);
+    await writeFile(join(sourcePath, 'billing.txt'), 'predecessor ready\n');
+    await git(['add', 'billing.txt'], sourcePath);
+    await git(['commit', '-m', 'Predecessor task change'], sourcePath);
+    await git(['push', '-u', 'origin', 'tracker/po-3/dev-predecessor'], sourcePath);
+
+    await git(['switch', 'main'], sourcePath);
+    await git(['switch', '-c', 'tracker/po-4/dev-dependent'], sourcePath);
+    await writeFile(join(sourcePath, 'reports.txt'), 'dependent ready\n');
+    await git(['add', 'reports.txt'], sourcePath);
+    await git(['commit', '-m', 'Dependent task change without predecessor'], sourcePath);
+    await git(['push', '-u', 'origin', 'tracker/po-4/dev-dependent'], sourcePath);
+
+    await git(['switch', 'main'], sourcePath);
+
+    const job = {
+      id: 133,
+      jobKind: 'merge_to_epic',
+      branchName: 'tracker/po-2/epic-1',
+      promptText: [
+        'Child issues to verify:',
+        '- PO-4: tracker/po-4/dev-dependent',
+      ].join('\n'),
+      input: {
+        codexCloudBaseBranch: 'main',
+        issueKey: 'PO-2',
+        requiredAncestorBranches: ['tracker/po-3/dev-predecessor'],
+      },
+    };
+    const preparedPath = await prepareExecutionRepo({}, job, sourcePath);
+    const prepareResult = await prepareJobGitState({}, job, preparedPath);
+
+    assert.deepEqual(prepareResult.requiredAncestorBranchesMerged, []);
+    await assert.rejects(
+      () => finalizeExecutionRepo({}, job, preparedPath),
+      /Child branch tracker\/po-4\/dev-dependent is missing required predecessor branches: tracker\/po-3\/dev-predecessor/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('finalizeExecutionRepo commits dirty worktree changes and pushes the job branch', async () => {
   const root = await mkdtemp(join(tmpdir(), 'cyrboard-agent-'));
   const originPath = join(root, 'origin.git');

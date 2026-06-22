@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.13 - 2026-06-22
+
+- Merge Tracker-provided required predecessor branches into a task branch before the local AI agent starts work.
+- Verify merge-to-epic jobs do not merge a child branch that is missing required predecessor branches.
+
 ## 0.1.12 - 2026-06-21
 
 - Retry transient Tracker API failures in the local runner client: network errors, `408`, `429`, and `5xx` gateway/backend responses.
