@@ -1,16 +1,29 @@
 import { clearInterval, setInterval } from 'node:timers';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runAgent } from './agents.js';
+import { materializeInputAttachments } from './attachments.js';
 import { redactSecrets } from './redact.js';
 import { TrackerClient } from './tracker-client.js';
 
 const JOB_HEARTBEAT_INTERVAL_MS = 30_000;
 const MAX_RETRY_DELAY_SECONDS = 60;
+const CLIENT_VERSION = '0.2.0';
 
 export async function runOnce(config, repoPath, options = {}) {
   const client = options.client || new TrackerClient(config.serverUrl);
   const agentRunner = options.agentRunner || runAgent;
-  const claim = await client.claim(config.runnerToken);
+  const claim = await client.claim(config.runnerToken, {
+    clientVersion: CLIENT_VERSION,
+    protocolVersion: 2,
+    capabilities: config.agent === 'codex' ? {
+      input_attachments_v1: {
+        fileKinds: ['image', 'pdf', 'docx', 'xlsx', 'csv'],
+        maxFiles: 20,
+        maxBytesPerFile: 25 * 1024 * 1024,
+        maxTotalBytes: 250 * 1024 * 1024,
+      },
+    } : {},
+  });
   const job = claim.job || null;
 
   if (job === null) {
@@ -20,16 +33,22 @@ export async function runOnce(config, repoPath, options = {}) {
 
   console.log(`Claimed job #${job.id} (${job.jobKind}).`);
   let heartbeatTimer = null;
+  let inputAttachments = { directory: null, files: [], cleanup: async () => {} };
 
   try {
+    if (Array.isArray(job.attachments) && job.attachments.length > 0 && config.agent !== 'codex') {
+      throw new Error('input_attachment_agent_unsupported');
+    }
+
     await client.heartbeat(config.runnerToken, {
       jobId: job.id,
       progressPercent: 10,
       progressStage: 'local_agent_started',
     });
     heartbeatTimer = startJobHeartbeat(client, config.runnerToken, job.id);
+    inputAttachments = await materializeInputAttachments(client, job);
 
-    const result = await agentRunner(config, job, repoPath);
+    const result = await agentRunner(config, job, repoPath, inputAttachments);
 
     heartbeatTimer = stopJobHeartbeat(heartbeatTimer);
     await client.heartbeat(config.runnerToken, {
@@ -60,6 +79,8 @@ export async function runOnce(config, repoPath, options = {}) {
     }
 
     throw error;
+  } finally {
+    await inputAttachments.cleanup();
   }
 }
 

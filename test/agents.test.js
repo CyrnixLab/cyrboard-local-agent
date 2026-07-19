@@ -35,6 +35,30 @@ test('buildCodexArgs enables workspace-write network access for Tracker MCP', ()
   assert.deepEqual(args.slice(-5), ['--model', 'gpt-5.5', '-c', 'model_reasoning_effort="xhigh"', '-']);
 });
 
+test('buildCodexArgs passes images and the verified attachment directory', () => {
+  const args = buildCodexArgs(
+    { sandbox: 'workspace-write', codexNetworkAccess: false },
+    { input: {} },
+    '/repo',
+    '/result.md',
+    {
+      directory: '/tmp/cyrboard-job-1',
+      files: [
+        { fileKind: 'image', path: '/tmp/cyrboard-job-1/screen.png' },
+        { fileKind: 'pdf', path: '/tmp/cyrboard-job-1/spec.pdf' },
+      ],
+    },
+  );
+
+  assert.deepEqual(args.slice(-5), [
+    '--add-dir',
+    '/tmp/cyrboard-job-1',
+    '--image',
+    '/tmp/cyrboard-job-1/screen.png',
+    '-',
+  ]);
+});
+
 test('buildCodexArgs uses job-scoped model and reasoning from Tracker claim payload', () => {
   const args = buildCodexArgs(
     {
@@ -249,6 +273,41 @@ test('prepareJobGitState creates the remote epic branch and merges child branche
 
     assert.equal(finalizeResult.pushed, true);
     assert.match(await gitOutput(['ls-remote', '--heads', 'origin', 'tracker/cott-100/epic-1'], preparedPath), /tracker\/cott-100\/epic-1/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('prepareJobGitState tolerates trailing sentence punctuation after child branch names', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cyrboard-agent-'));
+  const originPath = join(root, 'origin.git');
+  const sourcePath = join(root, 'source');
+
+  try {
+    await createMainRepository(originPath, sourcePath);
+
+    await git(['switch', '-c', 'tracker/swdr-3/dev-epic-4-child'], sourcePath);
+    await writeFile(join(sourcePath, 'certificate.txt'), 'doctor certificate\n');
+    await git(['add', 'certificate.txt'], sourcePath);
+    await git(['commit', '-m', 'Child task change'], sourcePath);
+    await git(['push', '-u', 'origin', 'tracker/swdr-3/dev-epic-4-child'], sourcePath);
+    await git(['switch', 'main'], sourcePath);
+
+    const job = {
+      id: 134,
+      jobKind: 'merge_to_epic',
+      branchName: 'tracker/swdr-2/epic-1',
+      promptText: [
+        'Child issues to merge:',
+        '- SWDR-3: tracker/swdr-3/dev-epic-4-child.',
+      ].join('\n'),
+      input: { codexCloudBaseBranch: 'main', issueKey: 'SWDR-2' },
+    };
+    const preparedPath = await prepareExecutionRepo({}, job, sourcePath);
+    const result = await prepareJobGitState({}, job, preparedPath);
+
+    assert.deepEqual(result.mergedBranches, ['tracker/swdr-3/dev-epic-4-child']);
+    assert.equal(await readFile(join(preparedPath, 'certificate.txt'), 'utf8'), 'doctor certificate\n');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

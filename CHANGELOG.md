@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0 - 2026-07-19
+
+- Advertise the versioned `input_attachments_v1` capability for Codex runners while keeping Claude disabled until its dedicated smoke test.
+- Download job-scoped PNG, JPEG, PDF, DOCX, XLSX and CSV inputs from same-origin Tracker URLs into private temporary storage.
+- Fail closed on unsupported metadata, HTTP/download errors, size or SHA-256 mismatch, and mutation during any Codex or merge-conflict continuation run.
+- Pass images through `codex exec --image`, expose verified documents through `--add-dir`, and always remove local copies after success or failure.
+
+## 0.1.14 - 2026-06-30
+
+- Normalize Tracker branch names parsed from prompts and required predecessor input so trailing sentence punctuation does not break `git fetch`/merge operations.
+- Add regression coverage for epic child branch lines ending with punctuation.
+
 ## 0.1.13 - 2026-06-22
 
 - Merge Tracker-provided required predecessor branches into a task branch before the local AI agent starts work.

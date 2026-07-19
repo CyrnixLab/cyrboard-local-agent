@@ -121,6 +121,42 @@ test('runOnce reports full result text separately from summary', async () => {
   ]);
 });
 
+test('runOnce advertises attachment capability only for Codex', async () => {
+  const claims = [];
+  const client = {
+    async claim(_token, profile) {
+      claims.push(profile);
+      return { job: null };
+    },
+  };
+
+  await runOnce({ agent: 'codex', runnerToken: 'token' }, '/repo', { client });
+  await runOnce({ agent: 'claude', runnerToken: 'token' }, '/repo', { client });
+
+  assert.equal(claims[0].clientVersion, '0.2.0');
+  assert.equal(claims[0].protocolVersion, 2);
+  assert.ok(claims[0].capabilities.input_attachments_v1);
+  assert.deepEqual(claims[1].capabilities, {});
+});
+
+test('runOnce fails closed when a non-Codex runner receives attachments', async () => {
+  const failures = [];
+  const client = {
+    async claim() {
+      return { job: { id: 23, jobKind: 'plan', attachments: [{ id: 'file-1' }] } };
+    },
+    async fail(_token, payload) {
+      failures.push(payload);
+    },
+  };
+
+  await assert.rejects(
+    () => runOnce({ agent: 'claude', runnerToken: 'token' }, '/repo', { client }),
+    /input_attachment_agent_unsupported/,
+  );
+  assert.deepEqual(failures, [{ jobId: 23, errorMessage: 'input_attachment_agent_unsupported' }]);
+});
+
 test('runOnce redacts secrets before reporting completion', async () => {
   const completedPayloads = [];
   const client = {

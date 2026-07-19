@@ -52,6 +52,42 @@ test('TrackerClient parses successful JSON responses', async () => {
   }
 });
 
+test('TrackerClient sends attachment protocol metadata in claim', async () => {
+  const previousFetch = globalThis.fetch;
+  let requestBody = null;
+  globalThis.fetch = async (_url, options) => {
+    requestBody = JSON.parse(options.body);
+
+    return Response.json({ job: null });
+  };
+
+  try {
+    const client = new TrackerClient('http://localhost:8182');
+    await client.claim('cyr_runner_test', {
+      clientVersion: '0.2.0',
+      protocolVersion: 2,
+      capabilities: { input_attachments_v1: {} },
+    });
+
+    assert.deepEqual(requestBody, {
+      clientVersion: '0.2.0',
+      protocolVersion: 2,
+      capabilities: { input_attachments_v1: {} },
+    });
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test('TrackerClient rejects cross-origin attachment URL', async () => {
+  const client = new TrackerClient('https://cyrboard.example');
+
+  await assert.rejects(
+    () => client.download('https://attacker.example/file', 'cyr_mcp_job_test'),
+    /input_attachment_cross_origin_url/,
+  );
+});
+
 test('TrackerClient retries transient gateway responses', async () => {
   const previousFetch = globalThis.fetch;
   let calls = 0;

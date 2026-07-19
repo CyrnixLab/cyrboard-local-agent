@@ -47,6 +47,16 @@ when needed and pre-merges child branches listed in the job prompt.
 For Codex, the default sandbox remains `workspace-write`. The runner also passes
 Codex workspace network access so the CLI can call Tracker MCP during the job.
 
+Codex runners also accept user input attachments from Tracker: PNG/JPEG images,
+PDF, DOCX, XLSX and CSV. The runner downloads every file before starting Codex,
+verifies its declared size and SHA-256, and stores it outside the execution
+worktree with private permissions. Images are passed with `codex exec --image`;
+the verified attachment directory is added with `--add-dir` for documents. The
+files are checked again after every agent run and removed in `finally`.
+
+Attachment capability is intentionally not advertised in `claude` mode yet.
+Tracker therefore leaves attachment jobs queued for a compatible Codex runner.
+
 ## Run
 
 ```bash
@@ -110,6 +120,8 @@ logs, comments, artifacts, or commits.
 - No secrets are committed or shipped in this repository.
 - The setup token is used only for `/tracker/local-runners/register`.
 - Tracker returns a separate job-scoped MCP token on `/tracker/local-runners/claim`.
+- Attachment downloads are same-origin, authenticated with that exact job token,
+  size/hash verified, stored outside the worktree, and never included in `git add`.
 - The long-lived runner token is local to the repository checkout.
 - `.cyrboard/` should be ignored by Git.
 - Revoke a runner from the Tracker project AI integration page.

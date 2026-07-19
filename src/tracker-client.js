@@ -36,8 +36,40 @@ export class TrackerClient {
     });
   }
 
-  async claim(runnerToken) {
-    return this.postJson('/tracker/local-runners/claim', runnerToken, {});
+  async claim(runnerToken, clientProfile = {}) {
+    return this.postJson('/tracker/local-runners/claim', runnerToken, clientProfile);
+  }
+
+  async download(path, bearerToken) {
+    const url = new URL(String(path || ''), `${this.serverUrl}/`);
+    const expectedOrigin = new URL(this.serverUrl).origin;
+
+    if (url.origin !== expectedOrigin) {
+      throw new Error('input_attachment_cross_origin_url');
+    }
+
+    let response;
+
+    try {
+      response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${bearerToken}`,
+          Accept: 'application/octet-stream',
+        },
+        redirect: 'error',
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      throw new Error(redactSecrets(`input_attachment_download_failed: ${message}`));
+    }
+
+    if (!response.ok || response.body === null) {
+      throw new Error(`input_attachment_download_failed: HTTP ${response.status}`);
+    }
+
+    return response;
   }
 
   async heartbeat(runnerToken, payload) {

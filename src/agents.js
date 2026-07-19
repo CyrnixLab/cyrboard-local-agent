@@ -1,6 +1,7 @@
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { redactSecrets } from './redact.js';
+import { verifyInputAttachments } from './attachments.js';
 
 const DEFAULT_MAX_MERGE_CONFLICT_AGENT_RUNS = 5;
 
@@ -14,13 +15,13 @@ class MergeConflictNeedsAgentError extends Error {
   }
 }
 
-export async function runAgent(config, job, repoPath) {
+export async function runAgent(config, job, repoPath, inputAttachments = { directory: null, files: [] }) {
   const workspaceDir = resolve(repoPath, '.cyrboard', 'jobs');
   const promptPath = resolve(workspaceDir, `${job.id}-prompt.md`);
   const resultPath = resolve(workspaceDir, `${job.id}-result.md`);
   const executionRepoPath = await prepareExecutionRepo(config, job, repoPath);
   const prepareResult = await prepareJobGitState(config, job, executionRepoPath);
-  let prompt = buildPrompt(job);
+  let prompt = buildPrompt(job, inputAttachments);
 
   await mkdir(workspaceDir, { recursive: true, mode: 0o700 });
 
@@ -29,8 +30,10 @@ export async function runAgent(config, job, repoPath) {
   const maxMergeConflictAgentRuns = resolveMaxMergeConflictAgentRuns(config);
 
   for (let attempt = 1; attempt <= maxMergeConflictAgentRuns; attempt += 1) {
+    await verifyInputAttachments(inputAttachments.files);
     await writeFile(promptPath, prompt, { mode: 0o600 });
-    const result = await runConfiguredAgent(config, job, executionRepoPath, promptPath, resultPath);
+    const result = await runConfiguredAgent(config, job, executionRepoPath, promptPath, resultPath, inputAttachments);
+    await verifyInputAttachments(inputAttachments.files);
     agentResults.push(result);
 
     try {
@@ -44,16 +47,19 @@ export async function runAgent(config, job, repoPath) {
       }
 
       partialFinalizeResults.push(error.partialResult);
-      prompt = buildMergeConflictContinuationPrompt(job, error, attempt + 1);
+      prompt = [
+        buildMergeConflictContinuationPrompt(job, error, attempt + 1),
+        buildAttachmentPrompt(inputAttachments),
+      ].filter(Boolean).join('\n\n');
     }
   }
 
   throw new Error(`Merge conflict was not resolved after ${maxMergeConflictAgentRuns} agent runs.`);
 }
 
-async function runConfiguredAgent(config, job, executionRepoPath, promptPath, resultPath) {
+async function runConfiguredAgent(config, job, executionRepoPath, promptPath, resultPath, inputAttachments) {
   if (config.agent === 'codex') {
-    return await runCodexAgent(config, job, executionRepoPath, promptPath, resultPath);
+    return await runCodexAgent(config, job, executionRepoPath, promptPath, resultPath, inputAttachments);
   }
 
   if (config.agent === 'claude') {
@@ -265,6 +271,10 @@ function normalizeBranchName(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function normalizePromptBranchName(value) {
+  return normalizeBranchName(value).replace(/[.,;:)\]}]+$/g, '');
+}
+
 async function ensureRemoteBranch(repoPath, branchName) {
   if (await gitSucceeds(repoPath, ['ls-remote', '--exit-code', '--heads', 'origin', branchName])) {
     return false;
@@ -288,7 +298,7 @@ export function resolveRequiredAncestorBranches(job) {
   }
 
   for (const branchNameValue of value) {
-    const branchName = normalizeBranchName(branchNameValue);
+    const branchName = normalizePromptBranchName(branchNameValue);
 
     if (branchName !== '') {
       branches.add(branchName);
@@ -305,7 +315,11 @@ function parseChildBranches(promptText) {
     const match = line.match(/^\s*-\s+[^:]+:\s+(tracker\/[^\s]+)\s*$/);
 
     if (match) {
-      branches.add(match[1]);
+      const branchName = normalizePromptBranchName(match[1]);
+
+      if (branchName !== '') {
+        branches.add(branchName);
+      }
     }
   }
 
@@ -522,7 +536,7 @@ export async function prepareExecutionRepo(config, job, repoPath) {
   return worktreePath;
 }
 
-function buildPrompt(job) {
+function buildPrompt(job, inputAttachments) {
   const mcpLines = [];
   const gitLines = [];
 
@@ -577,12 +591,26 @@ function buildPrompt(job) {
     '',
     ...gitLines,
     ...mcpLines,
+    buildAttachmentPrompt(inputAttachments),
   ].join('\n');
 }
 
-async function runCodexAgent(config, job, repoPath, promptPath, resultPath) {
+function buildAttachmentPrompt(inputAttachments) {
+  if (!inputAttachments || inputAttachments.files.length === 0) {
+    return '';
+  }
+
+  return [
+    '## User input attachments',
+    '',
+    'These verified files are immutable input supplied by the user. Inspect them as part of the request. Do not modify them.',
+    ...inputAttachments.files.map((file) => `- ${file.filename} (${file.mediaType}, ${file.sizeBytes} bytes): ${file.path}`),
+  ].join('\n');
+}
+
+async function runCodexAgent(config, job, repoPath, promptPath, resultPath, inputAttachments) {
   const command = 'codex';
-  const args = buildCodexArgs(config, job, repoPath, resultPath);
+  const args = buildCodexArgs(config, job, repoPath, resultPath, inputAttachments);
   const env = buildJobEnv(config, job, promptPath, resultPath);
   const prompt = await import('node:fs/promises').then((fs) => fs.readFile(promptPath, 'utf8'));
   const result = await runWithInput(command, args, prompt, { cwd: repoPath, env });
@@ -595,7 +623,7 @@ async function runCodexAgent(config, job, repoPath, promptPath, resultPath) {
   };
 }
 
-export function buildCodexArgs(config, job, repoPath, resultPath) {
+export function buildCodexArgs(config, job, repoPath, resultPath, inputAttachments = { directory: null, files: [] }) {
   const sandbox = config.sandbox || 'workspace-write';
   const args = [
     'exec',
@@ -621,6 +649,16 @@ export function buildCodexArgs(config, job, repoPath, resultPath) {
 
   if (reasoning) {
     args.push('-c', `model_reasoning_effort="${reasoning}"`);
+  }
+
+  if (inputAttachments.directory) {
+    args.push('--add-dir', inputAttachments.directory);
+  }
+
+  for (const file of inputAttachments.files) {
+    if (file.fileKind === 'image') {
+      args.push('--image', file.path);
+    }
   }
 
   args.push('-');
