@@ -30,3 +30,12 @@ fix.
 - Runner tokens are stored only in `.cyrboard/local-agent.json`.
 - `.cyrboard/` must not be committed to a project repository.
 - Logs and error messages should not print bearer tokens.
+
+## Automatic update trust boundary
+
+- Tracker supplies only an exact semantic version, never a shell command or
+  package name.
+- The package name is hardcoded as `@cyrnixlab/cyrboard-local-agent`.
+- npm is invoked without a shell and with lifecycle scripts disabled.
+- The installed package name and version are verified before its worker starts.
+- An incomplete install is removed without replacing the current runtime.

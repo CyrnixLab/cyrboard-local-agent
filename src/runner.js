@@ -4,10 +4,10 @@ import { runAgent } from './agents.js';
 import { materializeInputAttachments } from './attachments.js';
 import { redactSecrets } from './redact.js';
 import { TrackerClient } from './tracker-client.js';
+import { CLIENT_VERSION } from './version.js';
 
 const JOB_HEARTBEAT_INTERVAL_MS = 30_000;
 const MAX_RETRY_DELAY_SECONDS = 60;
-const CLIENT_VERSION = '0.2.0';
 
 export async function runOnce(config, repoPath, options = {}) {
   const client = options.client || new TrackerClient(config.serverUrl);
@@ -25,10 +25,20 @@ export async function runOnce(config, repoPath, options = {}) {
     } : {},
   });
   const job = claim.job || null;
+  const update = normalizeUpdate(claim.update);
 
   if (job === null) {
+    if (update.updateRequired) {
+      console.log(`Local agent ${update.latestVersion} is available; the idle worker will update now.`);
+      return {
+        claimed: false,
+        updateRequired: true,
+        latestVersion: update.latestVersion,
+      };
+    }
+
     console.log('No queued local_mcp jobs.');
-    return { claimed: false };
+    return { claimed: false, updateRequired: false };
   }
 
   console.log(`Claimed job #${job.id} (${job.jobKind}).`);
@@ -123,8 +133,20 @@ export async function startLoop(config, repoPath, intervalSeconds, options = {})
     iteration += 1;
 
     try {
-      await runOnceFn(config, repoPath);
+      const result = await runOnceFn(config, repoPath);
       consecutiveFailures = 0;
+
+      if (result?.updateRequired) {
+        if (typeof options.onUpdateRequired !== 'function') {
+          throw new Error('Automatic update requires the local agent supervisor.');
+        }
+
+        await options.onUpdateRequired(result.latestVersion);
+        return {
+          reason: 'update_required',
+          latestVersion: result.latestVersion,
+        };
+      }
     } catch (error) {
       consecutiveFailures += 1;
       const message = error instanceof Error ? error.message : String(error);
@@ -135,6 +157,19 @@ export async function startLoop(config, repoPath, intervalSeconds, options = {})
     const retryDelaySeconds = retryDelay(intervalSeconds, consecutiveFailures);
     await delayFn(retryDelaySeconds * 1000);
   }
+}
+
+function normalizeUpdate(update) {
+  if (!update || typeof update !== 'object') {
+    return { updateRequired: false, latestVersion: null };
+  }
+
+  const latestVersion = typeof update.latestVersion === 'string' ? update.latestVersion.trim() : '';
+
+  return {
+    updateRequired: update.updateRequired === true && latestVersion !== '' && latestVersion !== CLIENT_VERSION,
+    latestVersion: latestVersion || null,
+  };
 }
 
 function retryDelay(intervalSeconds, consecutiveFailures) {

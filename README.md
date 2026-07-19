@@ -9,7 +9,7 @@ the selected local AI tool, and reports status back to Tracker.
 ## Install
 
 ```bash
-npx @cyrnixlab/cyrboard-local-agent --help
+npx --yes @cyrnixlab/cyrboard-local-agent@latest --help
 ```
 
 ## Connect a repository
@@ -18,7 +18,7 @@ Copy the one-time command from the Tracker project AI settings and run it from
 the repository root:
 
 ```bash
-npx @cyrnixlab/cyrboard-local-agent connect \
+npx --yes @cyrnixlab/cyrboard-local-agent@latest connect \
   --server https://tracker.example.com \
   --project-id 1 \
   --token cyr_mcp_xxx \
@@ -57,22 +57,44 @@ files are checked again after every agent run and removed in `finally`.
 Attachment capability is intentionally not advertised in `claude` mode yet.
 Tracker therefore leaves attachment jobs queued for a compatible Codex runner.
 
+## Automatic updates
+
+The foreground `start` command runs a small supervisor and a job worker. Every
+idle claim sends the installed package version to Tracker. Tracker returns its
+current `latestVersion`; when a newer stable release is required it does not
+assign a job, and the supervisor installs that exact npm package version under
+`.cyrboard/runtime/` before restarting the worker.
+
+Updates never interrupt an active Codex/Claude process. A repository-level
+process lock also prevents two agents from polling with the same local config.
+If npm is temporarily unavailable, the supervisor keeps the old runtime,
+retries with backoff, and does not process jobs until it reaches the version
+required by Tracker.
+
+Versions older than `0.3.0` predate the updater and require one manual restart:
+
+```bash
+npx --yes @cyrnixlab/cyrboard-local-agent@latest start --repo .
+```
+
+After that bootstrap update, later releases are installed automatically.
+
 ## Run
 
 ```bash
-npx @cyrnixlab/cyrboard-local-agent start
+npx --yes @cyrnixlab/cyrboard-local-agent@latest start
 ```
 
 For a single claim/execute/report cycle:
 
 ```bash
-npx @cyrnixlab/cyrboard-local-agent run-once
+npx --yes @cyrnixlab/cyrboard-local-agent@latest run-once
 ```
 
 To verify local configuration without starting the polling loop:
 
 ```bash
-npx @cyrnixlab/cyrboard-local-agent status
+npx --yes @cyrnixlab/cyrboard-local-agent@latest status
 ```
 
 ## Agent modes
@@ -122,6 +144,8 @@ logs, comments, artifacts, or commits.
 - Tracker returns a separate job-scoped MCP token on `/tracker/local-runners/claim`.
 - Attachment downloads are same-origin, authenticated with that exact job token,
   size/hash verified, stored outside the worktree, and never included in `git add`.
+- Automatic updates install only the hardcoded official npm package at an exact
+  semantic version returned by Tracker; npm lifecycle scripts are disabled.
 - The long-lived runner token is local to the repository checkout.
 - `.cyrboard/` should be ignored by Git.
 - Revoke a runner from the Tracker project AI integration page.
@@ -139,3 +163,7 @@ npm publish --access public
 
 Before publishing, make sure the GitHub repository URL in `package.json`
 matches the public repository that hosts this code.
+
+Publish and verify the npm package before configuring
+`TRACKER_LOCAL_RUNNER_LATEST_VERSION` to the new version on Tracker. Reversing
+that order blocks old runners while the requested package is still unavailable.

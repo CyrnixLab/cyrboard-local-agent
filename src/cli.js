@@ -1,9 +1,14 @@
+import { spawn } from 'node:child_process';
 import { parseArgs, optionalInt, optionalString, requiredString } from './args.js';
 import { isLocalConfigIgnored, loadConfig, removeConfig, resolveRepoPath, saveConfig } from './config.js';
 import { UsageError } from './errors.js';
+import { acquireRunnerLock } from './process-lock.js';
 import { redactSecrets } from './redact.js';
 import { TrackerClient } from './tracker-client.js';
 import { runOnce, startLoop } from './runner.js';
+import { startSupervisor } from './supervisor.js';
+import { installRuntimeVersion } from './updater.js';
+import { CLIENT_VERSION } from './version.js';
 
 export async function main(argv) {
   const args = parseArgs(argv);
@@ -31,6 +36,16 @@ export async function main(argv) {
 
   if (command === 'status') {
     await status(args);
+    return;
+  }
+
+  if (command === '__worker') {
+    await runManagedWorker(args);
+    return;
+  }
+
+  if (command === '__run-once') {
+    await runManagedOneShot(args);
     return;
   }
 
@@ -93,7 +108,7 @@ async function connect(args) {
   }
 
   if (shouldStart) {
-    await startLoop(await loadConfig(repoPath), repoPath, intervalSeconds);
+    await startSupervisor(repoPath, intervalSeconds);
   } else {
     console.log('Run `cyrnixlab-local-agent start --repo . --interval 10` to process jobs.');
   }
@@ -104,12 +119,83 @@ async function runFromConfig(args, once) {
   const config = await loadConfig(repoPath);
 
   if (once) {
-    await runOnce(config, repoPath);
+    await runOneShotWithAutoUpdate(config, repoPath);
     return;
   }
 
   const intervalSeconds = optionalInt(args, 'interval', 10);
-  await startLoop(config, repoPath, intervalSeconds);
+  await startSupervisor(repoPath, intervalSeconds);
+}
+
+async function runManagedWorker(args) {
+  const repoPath = resolveRepoPath(optionalString(args, 'repo', '.'));
+  const intervalSeconds = optionalInt(args, 'interval', 10);
+  const config = await loadConfig(repoPath);
+
+  await startLoop(config, repoPath, intervalSeconds, {
+    onUpdateRequired: sendUpdateRequired,
+  });
+}
+
+async function runManagedOneShot(args) {
+  const repoPath = resolveRepoPath(optionalString(args, 'repo', '.'));
+  const result = await runOnce(await loadConfig(repoPath), repoPath);
+
+  if (result.updateRequired) {
+    throw new Error(`Local agent ${result.latestVersion} is required before a job can be claimed.`);
+  }
+}
+
+async function runOneShotWithAutoUpdate(config, repoPath) {
+  const releaseLock = await acquireRunnerLock(repoPath);
+
+  try {
+    const result = await runOnce(config, repoPath);
+
+    if (!result.updateRequired) {
+      return;
+    }
+
+    const binPath = await installRuntimeVersion(repoPath, result.latestVersion);
+    await runChild(binPath, ['__run-once', '--repo', repoPath]);
+  } finally {
+    await releaseLock();
+  }
+}
+
+function sendUpdateRequired(version) {
+  if (typeof process.send !== 'function') {
+    throw new Error('Managed local agent worker lost its supervisor IPC channel.');
+  }
+
+  return new Promise((resolvePromise, rejectPromise) => {
+    process.send({ type: 'update-required', version }, (error) => {
+      if (error) {
+        rejectPromise(error);
+        return;
+      }
+
+      resolvePromise();
+    });
+  });
+}
+
+function runChild(binPath, args) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(process.execPath, [binPath, ...args], {
+      stdio: 'inherit',
+    });
+
+    child.once('error', rejectPromise);
+    child.once('exit', (code, signal) => {
+      if (code === 0) {
+        resolvePromise();
+        return;
+      }
+
+      rejectPromise(new Error(`Updated local agent stopped (${signal || `exit code ${code}`}).`));
+    });
+  });
 }
 
 async function status(args) {
@@ -119,6 +205,7 @@ async function status(args) {
   console.log(`Server: ${config.serverUrl}`);
   console.log(`Project ID: ${config.projectId}`);
   console.log(`Runner ID: ${config.runnerId}`);
+  console.log(`Version: ${CLIENT_VERSION}`);
   console.log(`Agent: ${config.agent}`);
   if (config.model) {
     console.log(`Model: ${config.model}`);
@@ -143,6 +230,8 @@ async function disconnect(args) {
 
 function printHelp() {
   console.log(`Cyrnix Lab Local Agent
+
+Version: ${CLIENT_VERSION}
 
 Usage:
   cyrnixlab-local-agent connect --server <url> --project-id <id> --token <setup-token> [--repo .] [--agent codex|claude] [--model <model>] [--reasoning <effort>] [--permission-mode <mode>] [--start] [--interval 10]

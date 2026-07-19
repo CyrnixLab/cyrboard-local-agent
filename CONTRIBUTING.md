@@ -13,7 +13,8 @@ npm run smoke
 ## Rules
 
 - Do not commit tokens, environment files, or local `.cyrboard/` directories.
-- Do not add telemetry or network calls beyond the configured Tracker server.
+- Do not add telemetry or network calls beyond the configured Tracker server
+  and the official npm registry used by the automatic updater.
 - Keep dependencies minimal. Prefer Node.js standard library when practical.
 - Redact bearer tokens in errors, logs, tests, and fixtures.
 - Any change that affects authentication or token storage must update

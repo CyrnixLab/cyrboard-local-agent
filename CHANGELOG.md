@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 - 2026-07-20
+
+- Report the package version on every claim and consume Tracker's required
+  `latestVersion` without claiming a job on an outdated worker.
+- Run polling under a repository-scoped supervisor that updates only while idle
+  and prevents duplicate runner processes with a local lock.
+- Install exact official npm releases atomically under `.cyrboard/runtime/`,
+  disable lifecycle scripts, validate package identity, and retry failures with
+  backoff before restarting the worker.
+- Show the running package version in `status`; document the one-time manual
+  bootstrap required for versions older than `0.3.0`.
+
 ## 0.2.0 - 2026-07-19
 
 - Advertise the versioned `input_attachments_v1` capability for Codex runners while keeping Claude disabled until its dedicated smoke test.

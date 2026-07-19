@@ -133,10 +133,58 @@ test('runOnce advertises attachment capability only for Codex', async () => {
   await runOnce({ agent: 'codex', runnerToken: 'token' }, '/repo', { client });
   await runOnce({ agent: 'claude', runnerToken: 'token' }, '/repo', { client });
 
-  assert.equal(claims[0].clientVersion, '0.2.0');
+  assert.equal(claims[0].clientVersion, '0.3.0');
   assert.equal(claims[0].protocolVersion, 2);
   assert.ok(claims[0].capabilities.input_attachments_v1);
   assert.deepEqual(claims[1].capabilities, {});
+});
+
+test('runOnce requests an automatic update only while no job is claimed', async () => {
+  const result = await runOnce({ agent: 'codex', runnerToken: 'token' }, '/repo', {
+    client: {
+      async claim() {
+        return {
+          job: null,
+          update: {
+            latestVersion: '0.3.1',
+            updateRequired: true,
+          },
+        };
+      },
+    },
+  });
+
+  assert.deepEqual(result, {
+    claimed: false,
+    updateRequired: true,
+    latestVersion: '0.3.1',
+  });
+});
+
+test('startLoop stops polling and hands an idle update to the supervisor', async () => {
+  const updates = [];
+  let calls = 0;
+
+  const result = await startLoop({}, '/repo', 10, {
+    maxIterations: 2,
+    logger: { log: () => {}, warn: () => {} },
+    runOnce: async () => {
+      calls += 1;
+      return {
+        claimed: false,
+        updateRequired: true,
+        latestVersion: '0.3.1',
+      };
+    },
+    onUpdateRequired: async (version) => updates.push(version),
+  });
+
+  assert.equal(calls, 1);
+  assert.deepEqual(updates, ['0.3.1']);
+  assert.deepEqual(result, {
+    reason: 'update_required',
+    latestVersion: '0.3.1',
+  });
 });
 
 test('runOnce fails closed when a non-Codex runner receives attachments', async () => {
