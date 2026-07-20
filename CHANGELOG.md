@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1 - 2026-07-20
+
+- Publish a patch release used to verify the idle automatic update flow from
+  `0.3.0` to the next exact version returned by Tracker.
+
 ## 0.3.0 - 2026-07-20
 
 - Report the package version on every claim and consume Tracker's required

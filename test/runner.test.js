@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { resolveRequiredAncestorBranches } from '../src/agents.js';
 import { runOnce, startLoop } from '../src/runner.js';
+import { CLIENT_VERSION } from '../src/version.js';
 
 test('startLoop keeps polling after an iteration failure', async () => {
   const calls = [];
@@ -133,7 +134,7 @@ test('runOnce advertises attachment capability only for Codex', async () => {
   await runOnce({ agent: 'codex', runnerToken: 'token' }, '/repo', { client });
   await runOnce({ agent: 'claude', runnerToken: 'token' }, '/repo', { client });
 
-  assert.equal(claims[0].clientVersion, '0.3.0');
+  assert.equal(claims[0].clientVersion, CLIENT_VERSION);
   assert.equal(claims[0].protocolVersion, 2);
   assert.ok(claims[0].capabilities.input_attachments_v1);
   assert.deepEqual(claims[1].capabilities, {});
@@ -146,7 +147,7 @@ test('runOnce requests an automatic update only while no job is claimed', async 
         return {
           job: null,
           update: {
-            latestVersion: '0.3.1',
+            latestVersion: '0.3.2',
             updateRequired: true,
           },
         };
@@ -157,7 +158,7 @@ test('runOnce requests an automatic update only while no job is claimed', async 
   assert.deepEqual(result, {
     claimed: false,
     updateRequired: true,
-    latestVersion: '0.3.1',
+    latestVersion: '0.3.2',
   });
 });
 
