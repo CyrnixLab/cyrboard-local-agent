@@ -39,7 +39,7 @@ for queued `local_mcp` jobs. Keep the terminal open while this runner should
 process jobs.
 
 For branch-based jobs, the runner works in an isolated clone under
-`.cyrboard/worktrees/`. Codex, Claude, or SourceCraft edits files and runs checks there; after the
+`.cyrboard/worktrees/`. Codex, Claude, SourceCraft, or GigaCode edits files and runs checks there; after the
 CLI exits, the runner stages, validates, commits, and pushes the configured job
 branch. For epic review jobs, the runner also creates the missing epic branch
 when needed and pre-merges child branches listed in the job prompt.
@@ -65,7 +65,7 @@ current `latestVersion`; when a newer stable release is required it does not
 assign a job, and the supervisor installs that exact npm package version under
 `.cyrboard/runtime/` before restarting the worker.
 
-Updates never interrupt an active Codex, Claude, or SourceCraft process. A repository-level
+Updates never interrupt an active Codex, Claude, SourceCraft, or GigaCode process. A repository-level
 process lock also prevents two agents from polling with the same local config.
 If npm is temporarily unavailable, the supervisor keeps the old runtime,
 retries with backoff, and does not process jobs until it reaches the version
@@ -103,6 +103,8 @@ npx --yes @cyrnixlab/cyrboard-local-agent@latest status
 - `claude`: runs Claude Code in the repository.
 - `sourcecraft`: runs the SourceCraft AI agent headlessly through structured
   `src code -- run --format json` output and returns only its final answer.
+- `gigacode`: runs the corporate GigaCode CLI from Sber headlessly with
+  file-edit permission and the shell tool enabled for checks.
 
 `--model` and `--reasoning` are optional local defaults. Tracker job input can
 override them per AI executor/job.
@@ -127,6 +129,18 @@ credentials. Tracker maps SourceCraft models to the documented CLI values
 `ds` (Default), `ds-alt` (Experimental), and `legacy`; reasoning is not passed
 because the SourceCraft CLI integration has no compatible separate reasoning
 flag.
+
+For GigaCode, obtain corporate CLI access from Sber or your organization
+administrator, install and authenticate `gigacode`, then verify headless mode:
+
+```bash
+gigacode --help
+gigacode -p "Опиши этот репозиторий. Не изменяй файлы."
+```
+
+GigaCode credentials remain in the CLI on the developer machine. Cyrboard does
+not store them. The public GigaChat Authorization Key is used by the separate
+GigaChat API connector and does not authorize GigaCode CLI.
 
 Supported reasoning values:
 

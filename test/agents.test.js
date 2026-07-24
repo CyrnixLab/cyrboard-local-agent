@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { buildClaudeArgs, buildCodexArgs, buildSourceCraftArgs, finalizeExecutionRepo, parseSourceCraftJsonOutput, prepareExecutionRepo, prepareJobGitState, runAgent } from '../src/agents.js';
+import { buildClaudeArgs, buildCodexArgs, buildGigaCodeArgs, buildSourceCraftArgs, finalizeExecutionRepo, parseSourceCraftJsonOutput, prepareExecutionRepo, prepareJobGitState, runAgent } from '../src/agents.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -159,6 +159,20 @@ test('buildSourceCraftArgs uses structured SourceCraft output', () => {
     'Изучи репозиторий и выполни задачу.',
   ]);
   assert.throws(() => buildSourceCraftArgs({}, { input: {} }, '  '), /SourceCraft prompt is empty/);
+});
+
+test('buildGigaCodeArgs uses non-interactive edit and shell permissions', () => {
+  assert.deepEqual(buildGigaCodeArgs(
+    { agent: 'gigacode', model: 'default' },
+    { input: { aiAgentCode: 'gigacode', modelCode: 'default' } },
+    '  Изучи репозиторий и выполни задачу.  ',
+  ), [
+    '--approval-mode=auto-edit',
+    '--allowed-tools=run_shell_command',
+    '-p',
+    'Изучи репозиторий и выполни задачу.',
+  ]);
+  assert.throws(() => buildGigaCodeArgs({}, { input: {} }, '  '), /GigaCode prompt is empty/);
 });
 
 test('parseSourceCraftJsonOutput returns only the final stopped message', () => {

@@ -75,8 +75,8 @@ async function connect(args) {
     throw new UsageError('Missing required --project-id.');
   }
 
-  if (!['codex', 'claude', 'sourcecraft'].includes(agent)) {
-    throw new UsageError('--agent must be codex, claude, or sourcecraft.');
+  if (!['codex', 'claude', 'sourcecraft', 'gigacode'].includes(agent)) {
+    throw new UsageError('--agent must be codex, claude, sourcecraft, or gigacode.');
   }
 
   const client = new TrackerClient(serverUrl);
@@ -234,7 +234,7 @@ function printHelp() {
 Version: ${CLIENT_VERSION}
 
 Usage:
-  cyrnixlab-local-agent connect --server <url> --project-id <id> --token <setup-token> [--repo .] [--agent codex|claude|sourcecraft] [--model <model>] [--reasoning <effort>] [--permission-mode <mode>] [--start] [--interval 10]
+  cyrnixlab-local-agent connect --server <url> --project-id <id> --token <setup-token> [--repo .] [--agent codex|claude|sourcecraft|gigacode] [--model <model>] [--reasoning <effort>] [--permission-mode <mode>] [--start] [--interval 10]
   cyrnixlab-local-agent run-once [--repo .]
   cyrnixlab-local-agent start [--repo .] [--interval 10]
   cyrnixlab-local-agent status [--repo .]
@@ -244,6 +244,7 @@ Agent modes:
   codex      Run codex exec locally.
   claude     Run Claude Code locally.
   sourcecraft Run SourceCraft CLI headlessly with structured src code output.
+  gigacode   Run the corporate GigaCode CLI from Sber in headless mode.
 
 Reasoning efforts:
   low, medium, high, xhigh
@@ -253,6 +254,9 @@ Claude permission mode:
 
 SourceCraft:
   Authenticate SourceCraft CLI separately with src init / src auth login. Cyrboard does not store SourceCraft credentials.
+
+GigaCode:
+  Install and authenticate the corporate GigaCode CLI separately. Cyrboard does not store GigaCode credentials.
 `);
 }
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0 - 2026-07-24
+
+- Add `gigacode` local agent mode for the corporate GigaCode CLI from Sber.
+- Run GigaCode headlessly with file-edit approval and the shell tool enabled so
+  it can change the isolated worktree and execute repository checks.
+- Keep GigaCode authentication in the locally installed CLI and document that
+  a public GigaChat Authorization Key does not grant GigaCode CLI access.
+
 ## 0.4.1 - 2026-07-24
 
 - Run SourceCraft through `src code -- run --format json` and extract only the

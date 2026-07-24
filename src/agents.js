@@ -70,6 +70,10 @@ async function runConfiguredAgent(config, job, executionRepoPath, promptPath, re
     return await runSourceCraftAgent(config, job, executionRepoPath, promptPath, resultPath);
   }
 
+  if (config.agent === 'gigacode') {
+    return await runGigaCodeAgent(config, job, executionRepoPath, promptPath, resultPath);
+  }
+
   throw new Error(`Unsupported agent mode: ${config.agent}`);
 }
 
@@ -821,6 +825,52 @@ export function parseSourceCraftJsonOutput(output) {
   throw new Error('SourceCraft did not return a final text response.');
 }
 
+async function runGigaCodeAgent(config, job, repoPath, promptPath, resultPath) {
+  const command = 'gigacode';
+  const env = buildJobEnv(config, job, promptPath, resultPath);
+  const prompt = await readFile(promptPath, 'utf8');
+  const result = await runWithInput(command, buildGigaCodeArgs(config, job, prompt), '', {
+    cwd: repoPath,
+    env,
+  });
+  const finalText = String(result.stdout || result.stderr || '').trim();
+
+  if (finalText === '') {
+    throw new Error('GigaCode did not return a final text response.');
+  }
+
+  await writeFile(resultPath, finalText, { mode: 0o600 });
+  const resultText = redactSecrets(finalText);
+
+  return {
+    summary: redactSecrets(trimSummary(finalText)),
+    resultText,
+    resultPath,
+  };
+}
+
+export function buildGigaCodeArgs(config, job, prompt) {
+  const normalizedPrompt = String(prompt || '').trim();
+
+  if (normalizedPrompt === '') {
+    throw new Error('GigaCode prompt is empty.');
+  }
+
+  const args = [
+    '--approval-mode=auto-edit',
+    '--allowed-tools=run_shell_command',
+  ];
+  const model = resolveModel(config, job);
+
+  if (model && model !== 'default') {
+    args.push('--model', model);
+  }
+
+  args.push('-p', normalizedPrompt);
+
+  return args;
+}
+
 async function readResultText(resultPath, fallback) {
   try {
     const content = await readFile(resultPath, 'utf8');
@@ -1124,6 +1174,10 @@ function formatMissingCommandMessage(command) {
 
   if (command === 'src') {
     return 'SourceCraft CLI not found. Install SourceCraft CLI and make sure `src` is available in PATH for the terminal that runs cyrboard-local-agent.';
+  }
+
+  if (command === 'gigacode') {
+    return 'GigaCode CLI not found. Install the corporate GigaCode CLI provided by Sber and make sure `gigacode` is available in PATH for the terminal that runs cyrboard-local-agent.';
   }
 
   return `${command} command not found. Make sure it is installed and available in PATH.`;
