@@ -39,7 +39,7 @@ for queued `local_mcp` jobs. Keep the terminal open while this runner should
 process jobs.
 
 For branch-based jobs, the runner works in an isolated clone under
-`.cyrboard/worktrees/`. Codex/Claude edits files and runs checks there; after the
+`.cyrboard/worktrees/`. Codex, Claude, or SourceCraft edits files and runs checks there; after the
 CLI exits, the runner stages, validates, commits, and pushes the configured job
 branch. For epic review jobs, the runner also creates the missing epic branch
 when needed and pre-merges child branches listed in the job prompt.
@@ -65,7 +65,7 @@ current `latestVersion`; when a newer stable release is required it does not
 assign a job, and the supervisor installs that exact npm package version under
 `.cyrboard/runtime/` before restarting the worker.
 
-Updates never interrupt an active Codex/Claude process. A repository-level
+Updates never interrupt an active Codex, Claude, or SourceCraft process. A repository-level
 process lock also prevents two agents from polling with the same local config.
 If npm is temporarily unavailable, the supervisor keeps the old runtime,
 retries with backoff, and does not process jobs until it reaches the version
@@ -101,6 +101,8 @@ npx --yes @cyrnixlab/cyrboard-local-agent@latest status
 
 - `codex`: runs `codex exec` in the repository.
 - `claude`: runs Claude Code in the repository.
+- `sourcecraft`: runs the SourceCraft AI agent headlessly through structured
+  `src code -- run --format json` output and returns only its final answer.
 
 `--model` and `--reasoning` are optional local defaults. Tracker job input can
 override them per AI executor/job.
@@ -108,6 +110,23 @@ override them per AI executor/job.
 For Claude Code, the default permission mode is `bypassPermissions` so
 non-interactive jobs can run shell checks. Override it with
 `--permission-mode <mode>` if a repository needs stricter local behavior.
+
+For SourceCraft, install and authenticate `src` before connecting the runner:
+
+```bash
+curl -fsSL https://s3.yandexcloud.net/sourcecraft-cli/install.sh | sh
+src
+src auth login
+src do "Кратко опиши этот репозиторий."
+```
+
+The `src` onboarding can use browser-based IAM authentication or a Personal
+Access Token for headless environments. SourceCraft credentials remain in the
+CLI keyring/config on the developer machine; Cyrboard stores neither IAM nor PAT
+credentials. Tracker maps SourceCraft models to the documented CLI values
+`ds` (Default), `ds-alt` (Experimental), and `legacy`; reasoning is not passed
+because the SourceCraft CLI integration has no compatible separate reasoning
+flag.
 
 Supported reasoning values:
 

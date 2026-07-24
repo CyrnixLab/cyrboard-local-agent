@@ -66,6 +66,10 @@ async function runConfiguredAgent(config, job, executionRepoPath, promptPath, re
     return await runClaudeAgent(config, job, executionRepoPath, promptPath, resultPath);
   }
 
+  if (config.agent === 'sourcecraft') {
+    return await runSourceCraftAgent(config, job, executionRepoPath, promptPath, resultPath);
+  }
+
   throw new Error(`Unsupported agent mode: ${config.agent}`);
 }
 
@@ -716,6 +720,107 @@ export function buildClaudeArgs(config, job, repoPath) {
   return args;
 }
 
+async function runSourceCraftAgent(config, job, repoPath, promptPath, resultPath) {
+  const command = 'src';
+  const env = buildJobEnv(config, job, promptPath, resultPath);
+  const prompt = await readFile(promptPath, 'utf8');
+  const result = await runWithInput(command, buildSourceCraftArgs(config, job, prompt), '', {
+    cwd: repoPath,
+    env,
+    quietStdout: true,
+  });
+  const finalText = parseSourceCraftJsonOutput(result.stdout);
+
+  await writeFile(resultPath, finalText, { mode: 0o600 });
+  const resultText = redactSecrets(finalText);
+
+  return {
+    summary: redactSecrets(trimSummary(finalText)),
+    resultText,
+    resultPath,
+  };
+}
+
+export function buildSourceCraftArgs(config, job, prompt) {
+  const normalizedPrompt = String(prompt || '').trim();
+
+  if (normalizedPrompt === '') {
+    throw new Error('SourceCraft prompt is empty.');
+  }
+
+  const args = ['code'];
+  const model = resolveModel(config, job);
+
+  if (model && ['ds', 'ds-alt', 'legacy'].includes(model)) {
+    args.push('--model', model);
+  }
+
+  args.push(
+    '--',
+    'run',
+    '--format',
+    'json',
+    '--dangerously-skip-permissions',
+    normalizedPrompt,
+  );
+
+  return args;
+}
+
+export function parseSourceCraftJsonOutput(output) {
+  const textByMessageId = new Map();
+  const stoppedMessageIds = [];
+
+  for (const rawLine of String(output || '').split(/\r?\n/)) {
+    const jsonStart = rawLine.indexOf('{');
+
+    if (jsonStart < 0) {
+      continue;
+    }
+
+    let event;
+
+    try {
+      event = JSON.parse(rawLine.slice(jsonStart).trim());
+    } catch {
+      continue;
+    }
+
+    const part = event?.part;
+    const messageId = typeof part?.messageID === 'string'
+      ? part.messageID
+      : (typeof part?.messageId === 'string' ? part.messageId : null);
+
+    if (messageId === null) {
+      continue;
+    }
+
+    if (event?.type === 'text' && part?.type === 'text' && typeof part.text === 'string') {
+      const text = part.text.trim();
+
+      if (text !== '') {
+        const messageParts = textByMessageId.get(messageId) || [];
+        messageParts.push(text);
+        textByMessageId.set(messageId, messageParts);
+      }
+    }
+
+    if (event?.type === 'step_finish' && part?.reason === 'stop') {
+      stoppedMessageIds.push(messageId);
+    }
+  }
+
+  for (const messageId of stoppedMessageIds.reverse()) {
+    const finalText = (textByMessageId.get(messageId) || []).join('\n\n').trim();
+
+    if (finalText !== '') {
+      return finalText;
+    }
+  }
+
+  throw new Error('SourceCraft did not return a final text response.');
+}
+
 async function readResultText(resultPath, fallback) {
   try {
     const content = await readFile(resultPath, 'utf8');
@@ -923,7 +1028,10 @@ async function runWithInput(command, args, input, options = {}) {
     child.stdout.on('data', (chunk) => {
       const value = chunk.toString();
       stdout += value;
-      process.stdout.write(redactSecrets(value));
+
+      if (options.quietStdout !== true) {
+        process.stdout.write(redactSecrets(value));
+      }
     });
     child.stderr.on('data', (chunk) => {
       const value = chunk.toString();
@@ -1012,6 +1120,10 @@ function formatMissingCommandMessage(command) {
 
   if (command === 'claude') {
     return 'Claude Code CLI not found. Install Claude Code and make sure `claude` is available in PATH for the terminal that runs cyrboard-local-agent.';
+  }
+
+  if (command === 'src') {
+    return 'SourceCraft CLI not found. Install SourceCraft CLI and make sure `src` is available in PATH for the terminal that runs cyrboard-local-agent.';
   }
 
   return `${command} command not found. Make sure it is installed and available in PATH.`;

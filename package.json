@@ -1,6 +1,6 @@
 {
   "name": "@cyrnixlab/cyrboard-local-agent",
-  "version": "0.3.1",
+  "version": "0.4.1",
   "description": "Local runner connector for Cyrnix/Cyrboard Tracker Local Agent / MCP jobs.",
   "type": "module",
   "license": "MIT",
@@ -21,7 +21,9 @@
     "local-agent",
     "mcp",
     "codex",
-    "claude"
+    "claude",
+    "sourcecraft",
+    "yandex"
   ],
   "bin": {
     "cyrboard-local-agent": "bin/cyrboard-local-agent.js",

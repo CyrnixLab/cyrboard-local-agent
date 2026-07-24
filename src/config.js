@@ -31,7 +31,7 @@ export async function loadConfig(repoPath) {
   }
 
   if (parsed.agent === 'command') {
-    throw new Error('Command agent mode is no longer supported. Reconnect this runner with --agent codex or --agent claude.');
+    throw new Error('Command agent mode is no longer supported. Reconnect this runner with --agent codex, --agent claude, or --agent sourcecraft.');
   }
 
   return parsed;

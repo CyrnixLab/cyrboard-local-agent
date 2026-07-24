@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.1 - 2026-07-24
+
+- Run SourceCraft through `src code -- run --format json` and extract only the
+  final stopped assistant message.
+- Keep ANSI sequences, progress spinners, tool events, token statistics, and
+  other SourceCraft terminal output out of Tracker results.
+- Fail the job when SourceCraft does not return a structured final text response
+  instead of storing raw CLI output.
+
+## 0.4.0 - 2026-07-24
+
+- Add `sourcecraft` local agent mode backed by the documented headless
+  `src do` command.
+- Pass the supported SourceCraft model override (`ds`, `ds-alt`, or `legacy`)
+  from the runner configuration.
+- Keep SourceCraft IAM/PAT authentication entirely in the local SourceCraft CLI
+  installation and document setup/verification.
+
 ## 0.3.1 - 2026-07-20
 
 - Publish a patch release used to verify the idle automatic update flow from

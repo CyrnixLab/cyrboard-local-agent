@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { buildClaudeArgs, buildCodexArgs, finalizeExecutionRepo, prepareExecutionRepo, prepareJobGitState, runAgent } from '../src/agents.js';
+import { buildClaudeArgs, buildCodexArgs, buildSourceCraftArgs, finalizeExecutionRepo, parseSourceCraftJsonOutput, prepareExecutionRepo, prepareJobGitState, runAgent } from '../src/agents.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -140,6 +140,44 @@ test('buildClaudeArgs keeps matching job model override', () => {
   );
 
   assert.deepEqual(args.slice(-4), ['--model', 'claude-opus-4-1', '--effort', 'xhigh']);
+});
+
+test('buildSourceCraftArgs uses structured SourceCraft output', () => {
+  assert.deepEqual(buildSourceCraftArgs(
+    { agent: 'sourcecraft', model: 'legacy' },
+    { input: { aiAgentCode: 'sourcecraft', modelCode: 'ds-alt' } },
+    '  Изучи репозиторий и выполни задачу.  ',
+  ), [
+    'code',
+    '--model',
+    'ds-alt',
+    '--',
+    'run',
+    '--format',
+    'json',
+    '--dangerously-skip-permissions',
+    'Изучи репозиторий и выполни задачу.',
+  ]);
+  assert.throws(() => buildSourceCraftArgs({}, { input: {} }, '  '), /SourceCraft prompt is empty/);
+});
+
+test('parseSourceCraftJsonOutput returns only the final stopped message', () => {
+  const output = [
+    '\u001b[?25lStarting up\r',
+    '{"type":"step_start","part":{"messageID":"tool-message","type":"step-start"}}',
+    '{"type":"text","part":{"messageID":"tool-message","type":"text","text":"Служебное рассуждение"}}',
+    '{"type":"step_finish","part":{"messageID":"tool-message","type":"step-finish","reason":"tool-calls"}}',
+    'Connected',
+    '{"type":"text","part":{"messageID":"final-message","type":"text","text":"Decision: pass\\n"}}',
+    '{"type":"text","part":{"messageID":"final-message","type":"text","text":"Проверки пройдены."}}',
+    '{"type":"step_finish","part":{"messageID":"final-message","type":"step-finish","reason":"stop"}}',
+  ].join('\n');
+
+  assert.equal(parseSourceCraftJsonOutput(output), 'Decision: pass\n\nПроверки пройдены.');
+  assert.throws(
+    () => parseSourceCraftJsonOutput('\u001b[?25lStarting up\r\nConnected\n'),
+    /SourceCraft did not return a final text response/,
+  );
 });
 
 test('prepareExecutionRepo checks out the requested remote branch in an isolated clone', async () => {
@@ -575,6 +613,72 @@ test('runAgent keeps the source checkout clean and pushes fake Codex changes fro
     await git(['clone', originPath, verifyPath], root);
     await git(['switch', 'tracker/cott-103/dev-child'], verifyPath);
     assert.equal(await readFile(join(verifyPath, 'agent-output.txt'), 'utf8'), 'fake codex change\n');
+  } finally {
+    process.env.PATH = originalPath;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('runAgent executes SourceCraft headlessly and pushes its changes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cyrboard-agent-'));
+  const originPath = join(root, 'origin.git');
+  const sourcePath = join(root, 'source');
+  const verifyPath = join(root, 'verify');
+  const fakeBinPath = join(root, 'bin');
+  const fakeSourceCraftPath = join(fakeBinPath, 'src');
+  const originalPath = process.env.PATH;
+
+  try {
+    await createMainRepository(originPath, sourcePath);
+    await mkdir(fakeBinPath);
+    await writeFile(
+      fakeSourceCraftPath,
+      [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        'test "$1" = "code"',
+        'test "$2" = "--"',
+        'test "$3" = "run"',
+        'test "$4" = "--format"',
+        'test "$5" = "json"',
+        'test "$6" = "--dangerously-skip-permissions"',
+        'test "${7#*Cyrboard Tracker Job #128}" != "$7"',
+        'printf "fake sourcecraft change\\n" > sourcecraft-output.txt',
+        'printf "\\033[?25lStarting up\\r\\n"',
+        'printf \'%s\\n\' \'{"type":"text","part":{"messageID":"final-message","type":"text","text":"fake sourcecraft completed"}}\'',
+        'printf \'%s\\n\' \'{"type":"step_finish","part":{"messageID":"final-message","type":"step-finish","reason":"stop"}}\'',
+        '',
+      ].join('\n'),
+    );
+    await chmod(fakeSourceCraftPath, 0o755);
+
+    process.env.PATH = `${fakeBinPath}:${originalPath || ''}`;
+
+    const result = await runAgent(
+      {
+        agent: 'sourcecraft',
+        serverUrl: 'http://tracker.example.test',
+      },
+      {
+        id: 128,
+        projectId: 1,
+        issueId: 101,
+        jobKind: 'dev',
+        commandId: 'test-sourcecraft-dev',
+        branchName: 'tracker/cott-104/dev-child',
+        promptText: 'Create a fake SourceCraft change.',
+        input: { codexCloudBaseBranch: 'main', issueKey: 'COTT-104' },
+      },
+      sourcePath,
+    );
+
+    assert.match(result.resultText, /fake sourcecraft completed/);
+    assert.match(result.resultText, /Runner pushed branch tracker\/cott-104\/dev-child/);
+    assert.equal(await gitOutput(['status', '--short'], sourcePath), '');
+
+    await git(['clone', originPath, verifyPath], root);
+    await git(['switch', 'tracker/cott-104/dev-child'], verifyPath);
+    assert.equal(await readFile(join(verifyPath, 'sourcecraft-output.txt'), 'utf8'), 'fake sourcecraft change\n');
   } finally {
     process.env.PATH = originalPath;
     await rm(root, { recursive: true, force: true });
